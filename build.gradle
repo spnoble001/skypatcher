@@ -1,0 +1,251 @@
+import java.io.DataOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.util.zip.GZIPOutputStream
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
+import java.util.zip.ZipEntry
+
+buildscript {
+    repositories {
+        mavenCentral()
+        maven { url = "https://maven.minecraftforge.net" }
+    }
+    dependencies {
+        classpath "net.minecraftforge.gradle:ForgeGradle:2.1-SNAPSHOT"
+    }
+}
+
+apply plugin: "net.minecraftforge.gradle.forge"
+
+version = "1.0.0"
+group = "perfectpathc.dev"
+archivesBaseName = "perfectpatch"
+
+sourceCompatibility = targetCompatibility = JavaVersion.VERSION_1_8
+
+configurations {
+    proguard
+}
+
+dependencies {
+    proguard "net.sf.proguard:proguard-base:6.2.2"
+}
+
+minecraft {
+    version = "1.8.9-11.15.1.2318-1.8.9"
+    runDir = "run"
+    mappings = "stable_22"
+}
+
+processResources {
+    inputs.property "version", project.version
+    inputs.property "mcversion", project.minecraft.version
+
+    from(sourceSets.main.resources.srcDirs) {
+        include "mcmod.info"
+        expand version: project.version, mcversion: project.minecraft.version
+    }
+    from(sourceSets.main.resources.srcDirs) {
+        exclude "mcmod.info"
+    }
+}
+
+def cargoBinary = file(System.getProperty("user.home") + "/.cargo/bin/cargo")
+
+task buildNativeLinux(type: Exec) {
+    group = "build"
+    description = "Builds the Linux Rust JNI core."
+    workingDir "native"
+    commandLine(cargoBinary.exists() ? cargoBinary.absolutePath : "cargo", "build", "--release")
+}
+
+task buildNativeWindows(type: Exec) {
+    group = "build"
+    description = "Builds the Windows Rust JNI core."
+    workingDir "native"
+    environment "RUSTFLAGS", "-C linker=rust-lld -C target-feature=+crt-static -L native=" + System.getProperty("user.home") + "/.xwin/crt/lib/x86_64 -L native=" + System.getProperty("user.home") + "/.xwin/sdk/lib/um/x86_64 -L native=" + System.getProperty("user.home") + "/.xwin/sdk/lib/ucrt/x86_64"
+    commandLine(cargoBinary.exists() ? cargoBinary.absolutePath : "cargo", "build", "--target", "x86_64-pc-windows-msvc", "--release")
+}
+
+task buildNative {
+    dependsOn buildNativeLinux, buildNativeWindows
+}
+
+jar {
+    finalizedBy 'reobfJar'
+    dependsOn buildNative
+    from("native/target/release") {
+        include "libperfectpatch_native.so"
+        into "natives/linux/x86_64"
+    }
+    from("native/target/x86_64-pc-windows-msvc/release") {
+        include "perfectpatch_native.dll"
+        into "natives/windows/x86_64"
+    }
+}
+
+// =========================================================================
+// Tarea de Empaquetado PPM1 + GZIP (Post-Reobfuscation)
+// =========================================================================
+task packModulePlugins {
+    group = "build"
+    description = "Empaqueta las clases reofuscadas de los submódulos en assets/modules/core.bin dentro del JAR."
+    dependsOn reobfJar
+
+    def inputJar = file("${buildDir}/libs/${archivesBaseName}-${version}.jar")
+
+    inputs.file inputJar
+    outputs.file inputJar
+
+    doLast {
+        if (!inputJar.exists()) return
+
+        def tempJar = file("${buildDir}/libs/${archivesBaseName}-${version}-temp.jar")
+        def targetPackagePath = "perfectpathc/dev/modules/impl/" // Ajusta según tu paquete
+
+        def entriesToPack = []
+
+        // 1. Leer el JAR ya reofuscado e identificar las clases a empaquetar
+        ZipFile zipIn = new ZipFile(inputJar)
+        zipIn.entries().each { entry ->
+            if (!entry.isDirectory() && entry.name.startsWith(targetPackagePath) && entry.name.endsWith(".class")) {
+                def binaryName = entry.name.substring(0, entry.name.length() - 6).replace('/', '.')
+                def bytes = zipIn.getInputStream(entry).bytes
+                entriesToPack.add([name: binaryName, data: bytes])
+            }
+        }
+
+        if (entriesToPack.isEmpty()) {
+            println "⚠️ No se encontraron clases en '${targetPackagePath}' dentro del JAR. Omitiendo core.bin."
+            zipIn.close()
+            return
+        }
+
+        println "📦 Empaquetando ${entriesToPack.size()} clases en formato PPM1..."
+
+        // 2. Construir el contenedor PPM1 en memoria
+        ByteArrayOutputStream baos = new ByteArrayOutputStream()
+        GZIPOutputStream gzip = new GZIPOutputStream(baos)
+        DataOutputStream dos = new DataOutputStream(gzip)
+
+        dos.writeBytes("PPM1")  // Magic Header
+        dos.writeInt(1)         // Versión
+        dos.writeInt(entriesToPack.size())
+
+        entriesToPack.each { item ->
+            dos.writeUTF(item.name)
+            dos.writeInt(item.data.length)
+            dos.write(item.data)
+        }
+
+        // Closing DataOutputStream also closes GZIPOutputStream and writes its trailer.
+        dos.close()
+        byte[] coreBinBytes = baos.toByteArray()
+
+        // 3. Reconstruir el JAR: Excluyendo las clases empaquetadas e insertando assets/modules/core.bin
+        ZipOutputStream zipOut = new ZipOutputStream(new FileOutputStream(tempJar))
+
+        zipIn.entries().each { entry ->
+            // Excluir las clases del subpaquete para que no estén sueltas en el JAR
+            if (!entry.name.startsWith(targetPackagePath)) {
+                zipOut.putNextEntry(new ZipEntry(entry.name))
+                zipIn.getInputStream(entry).withCloseable { is ->
+                    zipOut << is
+                }
+                zipOut.closeEntry()
+            }
+        }
+        zipIn.close()
+
+        // Añadir el nuevo recurso core.bin al JAR
+        zipOut.putNextEntry(new ZipEntry("assets/modules/core.bin"))
+        zipOut.write(coreBinBytes)
+        zipOut.closeEntry()
+        zipOut.close()
+
+        // Reemplazar el JAR original con el transformado
+        inputJar.delete()
+        tempJar.renameTo(inputJar)
+
+        println "✅ assets/modules/core.bin generado con éxito (${coreBinBytes.length} bytes)."
+    }
+}
+
+def java8Home = {
+    def fromEnv = System.getenv("JAVA_HOME")
+    if (fromEnv != null) {
+        def rt = file("${fromEnv}/jre/lib/rt.jar")
+        if (rt.exists()) return file(fromEnv)
+        rt = file("${fromEnv}/lib/rt.jar")
+        if (rt.exists()) return file(fromEnv)
+    }
+    def sdkman = file("${System.getProperty('user.home')}/.sdkman/candidates/java/8.0.442-tem")
+    if (sdkman.exists()) return sdkman
+    return file(System.getProperty("java.home"))
+}()
+
+def java8RtJar = {
+    def candidates = [
+            file("${java8Home}/jre/lib/rt.jar"),
+            file("${java8Home}/lib/rt.jar")
+    ]
+    def hit = candidates.find { it.exists() }
+    if (hit == null) {
+        throw new GradleException("Java 8 rt.jar not found under ${java8Home}")
+    }
+    return hit
+}()
+
+task proguardJar(type: JavaExec) {
+    group = "build"
+    description = "Obfuscates the reobfuscated Forge JAR with ProGuard."
+    dependsOn packModulePlugins // <--- AHORA DEPENDE DE PACKMODULEPLUGINS
+
+    def inputJar = file("${buildDir}/libs/${archivesBaseName}-${version}.jar")
+    def outputJar = file("${buildDir}/libs/${archivesBaseName}-${version}-obf.jar")
+    def mappingFile = file("${buildDir}/proguard/mapping.txt")
+    def seedsFile = file("${buildDir}/proguard/seeds.txt")
+    def configFile = file("proguard-rules.pro")
+
+    inputs.file inputJar
+    inputs.file configFile
+    outputs.file outputJar
+    outputs.file mappingFile
+
+    classpath = configurations.proguard
+    main = "proguard.ProGuard"
+
+    doFirst {
+        mappingFile.parentFile.mkdirs()
+        if (outputJar.exists()) {
+            outputJar.delete()
+        }
+
+        def pgArgs = []
+        pgArgs << "-injars" << inputJar.absolutePath
+        pgArgs << "-outjars" << outputJar.absolutePath
+        pgArgs << "-libraryjars" << java8RtJar.absolutePath
+
+        def forgeRuntime = file("${gradle.gradleUserHomeDir}/caches/minecraft/net/minecraftforge/forge/1.8.9-11.15.1.2318-1.8.9/stable/22/forge-1.8.9-11.15.1.2318-1.8.9-binpatched.jar")
+        if (forgeRuntime.exists()) {
+            pgArgs << "-libraryjars" << forgeRuntime.absolutePath
+        }
+
+        configurations.compile.files.each { jarFile ->
+            if (jarFile.exists() && jarFile.name.endsWith(".jar") && jarFile.canonicalFile != inputJar.canonicalFile) {
+                pgArgs << "-libraryjars" << jarFile.absolutePath
+            }
+        }
+
+        pgArgs << "-include" << configFile.absolutePath
+        pgArgs << "-printmapping" << mappingFile.absolutePath
+        pgArgs << "-printseeds" << seedsFile.absolutePath
+        args = pgArgs
+    }
+}
+
+// Ajuste del flujo de finalización:
+reobfJar.finalizedBy packModulePlugins
+packModulePlugins.finalizedBy proguardJar
+assemble.dependsOn proguardJar

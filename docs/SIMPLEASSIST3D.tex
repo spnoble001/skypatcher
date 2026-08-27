@@ -1,0 +1,235 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage{amsmath,amssymb}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\geometry{margin=2.3cm}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue}
+
+\title{\texttt{SimpleAssist3D}: arquitectura reactiva de extrusión espacial}
+\author{PerfectPatch --- Minecraft Forge 1.8.9}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\texttt{SimpleAssist3D} es un ejecutor independiente de parches 3D. No reutiliza
+el cursor terminal--origen nativo de \texttt{SimpleAssist} 1D: mantiene su propia
+captura, selección reactiva, créditos, confirmación y watchdogs. Su objetivo es
+transformar un ancla real de obsidiana/bedrock y un \texttt{PatchCrumb} en una
+secuencia corta de placements físicamente verificables, sin modificar la cámara
+local ni extender el alcance del servidor.
+\end{abstract}
+
+\tableofcontents
+
+\section{Modelo geométrico}
+
+Sea $\mathbf e$ la posición de los ojos, $\mathbf l$ el vector de mirada y
+$\mathbf q$ el centro de la cara soporte elegida. Para una trayectoria Norte/Sur,
+el crumb define el plano objetivo
+\begin{equation}
+  X=X_c,\qquad Y=Y_c,
+\end{equation}
+por lo que $Z$ representa profundidad. Para una trayectoria Este/Oeste, el plano
+es $Z=Z_c, Y=Y_c$, con $X$ como profundidad. La distancia de progreso usada por el
+cursor es
+\begin{equation}
+ D_g(\mathbf p)=
+ \begin{cases}
+ |p_x-X_c|+|p_y-Y_c|,& \text{N/S},\\
+ |p_z-Z_c|+|p_y-Y_c|,& \text{E/O}.
+ \end{cases}
+\end{equation}
+Un placement ordinario debe reducir $D_g$. Los placements de profundidad se
+permiten únicamente como lead cinemático controlado (sección~\ref{sec:depth}).
+
+\section{Captura y ciclo reactivo}
+
+El módulo se ejecuta en \texttt{ClientTickEvent.Phase.START}. Para iniciar una
+sesión necesita un crumb activo, un bloque aceptado en la mano y un ancla aceptada.
+Con Asistencia espacial activa, la captura puede usar el cono expandido para
+normalizar pequeños desajustes de puntería.
+
+No se conserva una ruta A* larga. En cada tick se parte del último bloque
+confirmado o del último bloque pendiente, se revalida el mundo actual y se escoge
+el siguiente vecino. El estado persistente es deliberadamente pequeño:
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Estado & Propósito \\
+\midrule
+crumb, eje y revisión capturados & Meta geométrica vigente \\
+último confirmado & Base estable del cursor \\
+hasta dos pendientes & Ventana de extrusión y confirmación \\
+ancla/paridad de profundidad & Conservación de la retícula agua--bloque \\
+candidato retenido & Histéresis de selección \\
+créditos y tiempos & Ritmo y recuperación de estancamiento \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Cono espacial, reach y línea de visión}
+
+La distancia longitudinal y la distancia perpendicular de una cara al rayo son
+\begin{equation}
+ \lambda=\frac{(\mathbf q-\mathbf e)\cdot\mathbf l}{\|\mathbf l\|^2},
+ \qquad
+ d_\perp=\left\|\mathbf q-\left(\mathbf e+\lambda\mathbf l\right)\right\|.
+\end{equation}
+La captura expandida requiere $\lambda\geq0$ y
+\begin{equation}
+ d_\perp\leq R_{\rm cone}=1.25.
+\end{equation}
+La normalización explícita por $\|\mathbf l\|^2$ protege el cálculo aunque el
+vector de mirada no sea unitario.
+
+La autorización física usa la posición de ojos viva, nunca la predicha:
+\begin{equation}
+ \|\mathbf q-\mathbf e\|\leq R_{\rm real},
+ \qquad R_{\rm real}=\min(R_{\rm controller},4.5).
+\end{equation}
+Además, el soporte debe ser sólido y el raytrace debe llegar a ese soporte. Como
+$\mathbf q$ cae exactamente sobre una frontera de AABB en 1.8.9, el extremo del
+raytrace se introduce $\varepsilon=0.001$ bloques en el bloque soporte:
+\begin{equation}
+ \mathbf q_{\rm trace}=\mathbf q-\varepsilon\mathbf n_{\rm face}.
+\end{equation}
+Esto evita falsos misses en ángulos rasantes.
+
+\section{Restricciones físicas duras}
+
+Ningún score puede compensar una regla dura. Antes de emitir un placement se exige:
+\begin{enumerate}
+ \item El destino es reemplazable.
+ \item Existe una de las seis caras soporte válida; en una ventana encadenada, el
+       primer bloque pendiente puede ser soporte virtual del segundo.
+ \item El hit vector pasa reach real, cono expandido, raytrace y línea de visión.
+ \item El bloque lleno a colocar no intersecta la caja del jugador.
+\end{enumerate}
+
+Para la última condición se prueba
+\begin{equation}
+ \operatorname{AABB}_{\rm player}\oplus(0.05,0,0.05)
+ \;\cap\;\operatorname{AABB}_{\rm destination}=\varnothing.
+\end{equation}
+La expansión es solo horizontal: no se expande $Y$, para no cancelar placements
+legítimos bajo los pies.
+
+Las rutas mixtas permanecen en $Y_c\pm1$. Una columna ya alineada con el plano
+objetivo puede usar $Y_c\pm3$. En el cursor ordinario, la posición lateral del
+jugador respecto al plano del crumb restringe la cara horizontal admisible; los
+pasos verticales no heredan dicha restricción.
+
+\section{Selección cinemática local}
+
+El selector evalúa como máximo seis direcciones, por lo que su complejidad es
+$O(1)$ por tick. La predicción solo ordena candidatos. Definiendo
+$s^2=v_x^2+v_z^2$, el ojo predicho es
+\begin{equation}
+ \widehat{\mathbf e}=\mathbf e+f\mathbf v,\qquad
+ f=\begin{cases}
+ 1,&s^2>0.015,\\
+ 0.5,&0.005<s^2\leq0.015,\\
+ 0,&s^2\leq0.005.
+ \end{cases}
+\end{equation}
+
+Para una cara $c$, el coste implementado es
+\begin{equation}
+ \begin{split}
+ C(c)={}&40\,D_g(c)+25\,D_{\rm depth}(c)
+       +1.5\,\|\mathbf q_c-\widehat{\mathbf e}\|^2\\
+      &+3\,\Delta\theta(c)+P_{\rm behind}(c),
+ \end{split}
+\end{equation}
+donde
+\begin{equation}
+ \Delta\theta(c)=\arccos\!\left(
+ \frac{(\mathbf q_c-\mathbf e)\cdot\mathbf l}
+ {\|\mathbf q_c-\mathbf e\|\,\|\mathbf l\|}\right)
+\end{equation}
+y la penalización de inercia es
+\begin{equation}
+ P_{\rm behind}(c)=
+ \begin{cases}
+ -5\,\widehat{\mathbf v}_{xz}\cdot\widehat{(\mathbf q_c-\mathbf p)}_{xz},
+ &\widehat{\mathbf v}_{xz}\cdot\widehat{(\mathbf q_c-\mathbf p)}_{xz}<0,\\
+ 0,&\text{en otro caso.}
+ \end{cases}
+\end{equation}
+Los pesos, por tanto, son $w_g=40$, $w_d=25$, $w_r=1.5$,
+$w_\theta=3$ y $w_b=5$.
+
+\section{Lead de profundidad y separación}\label{sec:depth}
+
+La profundidad no altera el plano final, pero no puede destruir la retícula del
+parche. Todos los nodos aceptados respetan
+\begin{equation}
+ |d(\mathbf p)-d(\mathbf a)|\bmod2=0,
+\end{equation}
+donde $d$ es $Z$ para N/S y $X$ para E/O, y $\mathbf a$ es el ancla de sesión.
+Un lead puede avanzar exactamente dos bloques en dirección de la velocidad de
+profundidad. Solo se favorece si $|v_d|>0.005$ y nunca se aleja más de dos celdas
+de $\mathbf a$. La celda intermedia queda como agua: no se coloca ni se inventa
+como soporte virtual.
+
+\section{Histéresis y degradación suave}
+
+Un candidato retenido puede vivir dos ticks. En cada reutilización se recalculan
+soporte, reach, línea de visión, hitbox y nodo guía contra el mundo vivo. Si falla
+una regla dura, se descarta inmediatamente. Si sigue válido, un challenger lo
+reemplaza solo cuando
+\begin{equation}
+ C_{\rm new}<0.85\,C_{\rm active}.
+\end{equation}
+Es decir, necesita al menos un $15\%$ de mejora. Cambios pequeños de ángulo o
+distancia dentro del reach no purgan el candidato, evitando oscilación y jitter.
+
+\section{Extrusión, créditos y red}
+
+El bucket local se actualiza con CPS configurables ($1\ldots20$):
+\begin{equation}
+ K_t=\min\left(2,K_{t-1}+\Delta t\frac{\mathrm{CPS}}{20}\right),
+ \qquad \text{emitir si }K_t\geq1,
+\end{equation}
+restando un crédito por placement. El motor espacial mantiene un segundo bucket
+independiente, recargado en cada pre-motion y también limitado a dos interacciones.
+
+Si existen créditos y soporte válidos, se permite una ventana de dos placements
+pendientes. La secuencia se conserva en orden de red:
+\begin{center}
+\texttt{C05 Look} $\rightarrow$ \texttt{C08 Place} $\rightarrow$
+\texttt{C05 Look} $\rightarrow$ \texttt{C08 Place}.
+\end{center}
+El C05 lleva yaw/pitch calculados hacia $\mathbf q$, pero no escribe
+\texttt{rotationYaw} ni \texttt{rotationPitch} locales. El segundo C08 puede usar
+el primer bloque aún pendiente como soporte únicamente si la línea hacia ese
+soporte virtual está limpia.
+
+\section{Confirmación, revisión y watchdogs}
+
+Cada destino pendiente almacena block-id y tick de envío. Solo al observar ese
+block-id en el mundo cliente se promueve a \emph{último confirmado}. Un pendiente
+expira después de $80$ ticks; el cursor también se reinicia tras $80$ ticks sin
+progreso o tras tres misses de solicitud. Durante \texttt{isUsingItem()}, el
+watchdog de progreso se suspende, aunque un pendiente individual sigue expirando.
+
+Al capturar se guarda la revisión de \texttt{PatchCrumbs}. Cuando cambia, se lee
+el crumb nuevo. La sesión se conserva exclusivamente si eje, $Y$ y coordenada de
+plano ($X$ para N/S, $Z$ para E/O) siguen iguales. En tal caso se adopta la
+representación fresca sin perder pendientes ni créditos. Si el crumb expira o el
+plano cambia, la sesión se reinicia antes de emitir otro paquete.
+
+\section{Límites deliberados}
+
+El módulo no mueve al jugador, no cambia de slot, no modifica la cámara local y
+no aumenta el reach de Vanilla. Predicción, histéresis, lead y guía cambian qué
+candidato es preferible; jamás convierten en válido un placement que falle una
+restricción física.
+
+\end{document}

@@ -1,0 +1,11 @@
+[
+  {
+    "modid": "perfectpatch",
+    "name": "Perfect Patch Debug",
+    "description": "Standalone debug harness for PatchCrumbs",
+    "version": "${version}",
+    "mcversion": "${mcversion}",
+    "authorList": [],
+    "dependencies": []
+  }
+]
