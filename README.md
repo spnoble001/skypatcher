@@ -1,4 +1,4 @@
-# PerfectPatch
+# SkyPatcher
 
 Standalone Minecraft Forge 1.8.9 debug harness for:
 
