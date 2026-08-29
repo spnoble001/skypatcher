@@ -90,6 +90,9 @@ public final class PatchCrumbs extends Module {
     public void onDisable() {
         this.debugRouteVisible = false;
         resetDetectionState();
+        // PatchCrumbs owns the shared route frame.  Clear it together with
+        // its detector so neither executor can inherit a stale terminal.
+        NativeBridge.syncPatchCrumbsToSimpleAssist();
     }
 
     @Override
@@ -122,6 +125,10 @@ public final class PatchCrumbs extends Module {
                 }
             }
         }
+        // Publish once per producer tick, before SimpleAssist 1D/3D arbitrate.
+        // This keeps 3D autonomous when the parent mode intentionally gates
+        // the 1D executor off.
+        pushActivePatchesToNative();
     }
 
     private void crumbSandCheck(Entity entity) {

@@ -104,11 +104,11 @@ public final class SpatialAssistanceEngine {
             // range near 4.5 blocks at oblique angles.
             Vec3 hitVector = nearestPointOnFace(eyePos, support, side);
             if (!isPhysicallyPlausible(player, support, side, hitVector)) continue;
-            double distance = eyePos.distanceTo(hitVector);
-            if (distance > reach || requireExpandedCone
-                    && !isWithinCaptureRadius(eyePos, lookVector, hitVector) || !(virtualSupport
-                    ? hasClearLineToQueuedSupport(minecraft.theWorld, eyePos, hitVector)
-                    : hasUnobstructedLineOfSight(minecraft.theWorld, eyePos, hitVector, support, side))) {
+            boolean valid = isExecutionPointValid(minecraft.theWorld, eyePos, lookVector, hitVector,
+                    support, side, reach, requireExpandedCone, virtualSupport);
+            if (!valid && !virtualSupport) hitVector = fallbackFacePoint(minecraft.theWorld, eyePos,
+                    lookVector, support, side, reach, requireExpandedCone);
+            if (hitVector == null) {
                 continue;
             }
             double angularDelta = angularDelta(eyePos, lookVector, hitVector);
@@ -389,6 +389,25 @@ public final class SpatialAssistanceEngine {
                         position.getZ() + 0.5D);
         }
     }
+
+    private static boolean isExecutionPointValid(World world, Vec3 eye, Vec3 look, Vec3 hit,
+                                                  BlockPos support, EnumFacing side, double reach,
+                                                  boolean cone, boolean queued) {
+        return eye.distanceTo(hit) <= reach && (!cone || isWithinCaptureRadius(eye, look, hit))
+                && (queued ? hasClearLineToQueuedSupport(world, eye, hit)
+                : hasUnobstructedLineOfSight(world, eye, hit, support, side));
+    }
+
+    /** Legacy projection stays primary; these four are fallback only. */
+    private static Vec3 fallbackFacePoint(World world, Vec3 eye, Vec3 look, BlockPos pos,
+                                          EnumFacing side, double reach, boolean cone) {
+        double[] p={.15D,.15D,.85D,.15D,.85D,.85D,.15D,.85D};
+        for(int i=0;i<p.length;i+=2){ double a=p[i],b=p[i+1]; Vec3 h;
+            switch(side){case DOWN:h=new Vec3(pos.getX()+a,pos.getY(),pos.getZ()+b);break;case UP:h=new Vec3(pos.getX()+a,pos.getY()+1,pos.getZ()+b);break;case NORTH:h=new Vec3(pos.getX()+a,pos.getY()+b,pos.getZ());break;case SOUTH:h=new Vec3(pos.getX()+a,pos.getY()+b,pos.getZ()+1);break;case WEST:h=new Vec3(pos.getX(),pos.getY()+a,pos.getZ()+b);break;default:h=new Vec3(pos.getX()+1,pos.getY()+a,pos.getZ()+b);}
+            if(isExecutionPointValid(world,eye,look,h,pos,side,reach,cone,false)) return h;
+        } return null;
+    }
+
 
     private static double clamp(double value, double minimum, double maximum) {
         return Math.max(minimum, Math.min(maximum, value));

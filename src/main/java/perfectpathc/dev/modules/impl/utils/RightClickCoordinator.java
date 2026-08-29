@@ -8,10 +8,12 @@ public final class RightClickCoordinator {
     private static final int OWNER_PRE_PATCH = 2;
     private static final int OWNER_THROW_POT = 3;
     private static final int OWNER_SIMPLE_ASSIST_3D = 4;
+    private static final int OWNER_PRE_PATCH_V2 = 5;
     private static Owner simpleAssistOwner;
     private static Owner prePatchOwner;
     private static Owner throwPotOwner;
     private static Owner simpleAssist3DOwner;
+    private static Owner prePatchV2Owner;
 
     public interface Owner {
         void onRightClickControlLost();
@@ -43,6 +45,7 @@ public final class RightClickCoordinator {
             case OWNER_PRE_PATCH: return "PrePatch";
             case OWNER_THROW_POT: return "ThrowPot";
             case OWNER_SIMPLE_ASSIST_3D: return "SimpleAssist3D";
+            case OWNER_PRE_PATCH_V2: return "PrePatchV2";
             default: return "none";
         }
     }
@@ -69,6 +72,10 @@ public final class RightClickCoordinator {
             simpleAssist3DOwner = owner;
             return OWNER_SIMPLE_ASSIST_3D;
         }
+        if ("perfectpathc.dev.modules.impl.PrePatchV2".equals(className)) {
+            prePatchV2Owner = owner;
+            return OWNER_PRE_PATCH_V2;
+        }
         throw new IllegalArgumentException("RightClick owner no registrado");
     }
 
@@ -81,6 +88,8 @@ public final class RightClickCoordinator {
             if (throwPotOwner != null) throwPotOwner.onRightClickControlLost();
         } else if (ownerId == OWNER_SIMPLE_ASSIST_3D) {
             if (simpleAssist3DOwner != null) simpleAssist3DOwner.onRightClickControlLost();
+        } else if (ownerId == OWNER_PRE_PATCH_V2) {
+            if (prePatchV2Owner != null) prePatchV2Owner.onRightClickControlLost();
         }
     }
 }

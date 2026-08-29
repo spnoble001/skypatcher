@@ -490,6 +490,46 @@ fn activate_capture(
     state.last_progress_tick = tick;
 }
 
+/**
+ * V2 may move a PrePatch endpoint only farther along its already-captured
+ * horizontal V1 ray.  This cannot turn the session into a 3D route, shorten
+ * it behind the cursor, or alter the terminal/ancla.
+ */
+pub extern "system" fn Java_perfectpathc_dev_nativecore_NativeBridge_retargetSimpleAssistPrePatchNative(
+    _env: JNIEnv,
+    _class: JClass,
+    requested_origin: jlong,
+) {
+    crate::lifecycle::jni_guarded!();
+    let Ok(mut state) = SIMPLE_ASSIST_STATE
+        .get_or_init(|| Mutex::new(SimpleAssistState::new()))
+        .lock()
+    else {
+        return;
+    };
+    if !state.active || state.capture_source != CAPTURE_SOURCE_PRE_PATCH {
+        return;
+    }
+    let (tx, ty, tz) = (state.terminal >> 38, state.terminal << 26 >> 52,
+            state.terminal << 38 >> 38);
+    let (ox, oy, oz) = (state.origin >> 38, state.origin << 26 >> 52,
+            state.origin << 38 >> 38);
+    let (rx, ry, rz) = (requested_origin >> 38, requested_origin << 26 >> 52,
+            requested_origin << 38 >> 38);
+    if oy != ty || ry != ty { return; }
+    let (base, requested) = if ox != tx && oz == tz && rz == tz {
+        (ox - tx, rx - tx)
+    } else if oz != tz && ox == tx && rx == tx {
+        (oz - tz, rz - tz)
+    } else {
+        return;
+    };
+    if base == 0 || requested.signum() != base.signum() || requested.abs() <= base.abs() {
+        return;
+    }
+    state.origin = requested_origin;
+}
+
 fn consider_simple_assist_request_candidate(
     state: &mut SimpleAssistState,
     support: jlong,

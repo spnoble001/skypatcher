@@ -232,6 +232,11 @@ public final class NativeBridge {
         if (!requireNative()) return Long.MIN_VALUE;
         return d(238);
     }
+    /** Advances only an already-captured PrePatch horizon on its V1 ray. */
+    public static void retargetSimpleAssistPrePatch(long origin) {
+        if (!requireNative()) return;
+        d(240, origin, 0L);
+    }
     public static long prePatchRenderRecord(int index) {
         if (!requireNative()) return Long.MIN_VALUE;
         return d(196, index, 0L);

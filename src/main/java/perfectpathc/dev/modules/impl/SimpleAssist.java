@@ -23,6 +23,7 @@ import perfectpathc.dev.modules.impl.utils.GlobalCps;
 import perfectpathc.dev.modules.impl.utils.GlobalReducedKb;
 import perfectpathc.dev.modules.impl.utils.GlobalSpatialAssistance;
 import perfectpathc.dev.modules.impl.utils.GlobalNaturalMode;
+import perfectpathc.dev.modules.impl.utils.AnchorQuarantineRegistry;
 import perfectpathc.dev.modules.impl.utils.GlobalRenderHelp;
 import perfectpathc.dev.modules.impl.utils.RightClickCoordinator;
 import perfectpathc.dev.modules.impl.simpleassist.StateDrivenFriction;
@@ -44,6 +45,8 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
     private final StateDrivenFriction stateDrivenFriction = StateDrivenFriction.shared();
     private boolean stateFrictionRegistered;
     private int appliedExecutionMode = -1;
+    /** True only for the native capture admitted from PrePatch's live intent. */
+    private boolean prePatchExecution;
 
     @Override
     public Object invokeCommand(int commandId, Object... args) {
@@ -109,12 +112,23 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
         if (!this.enabled || !NativeBridge.isNativeAvailable()) {
             return;
         }
-        if (isThreeDimensionalMode()) {
+        // 3D owns only real PatchCrumbs routes.  PrePatch keeps its proven
+        // linear executor even while the parent mode is set to 3D.
+        if (isThreeDimensionalMode()
+                && (!hasPrePatchFlow() || hasPriority3DRoute())) {
             unregisterStateFriction();
+            if (event.phase == TickEvent.Phase.START && hasPriority3DRoute()) {
+                releaseInput();
+                clearCapturedPatch();
+            }
             return;
         }
         if (event.phase == TickEvent.Phase.START) {
             try {
+                if (this.minecraft.thePlayer != null && this.minecraft.theWorld != null) {
+                    AnchorQuarantineRegistry.shared().observe(this.minecraft.theWorld,
+                            this.minecraft.thePlayer.ticksExisted);
+                }
                 syncStateFrictionRegistration();
                 if (this.stateFrictionRegistered) this.stateDrivenFriction.onTickStart(this.minecraft);
                 this.spatialAssistance.onPreMotionUpdate();
@@ -143,9 +157,15 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
                 || nativePhase == 1 || nativePhase == 2;
         boolean clickGuiOpen = this.minecraft.currentScreen instanceof ClickGuiObj;
         boolean prePatchIntent = !clickGuiOpen && hasPrePatchIntentUnderCrosshair();
-        boolean validTrigger = isPatchBlockHeld()
-                && ((hasValidRuntime() && (activeFlow || hasPatchTerminalUnderCrosshair()))
-                || prePatchIntent);
+        boolean validTrigger;
+        if (isThreeDimensionalMode()) {
+            validTrigger = isPatchBlockHeld() && !hasPriority3DRoute()
+                    && (this.prePatchExecution || prePatchIntent);
+        } else {
+            validTrigger = isPatchBlockHeld()
+                    && ((hasValidRuntime() && (activeFlow || hasPatchTerminalUnderCrosshair()))
+                    || prePatchIntent);
+        }
         if (validTrigger) {
             if (RightClickCoordinator.acquire(this, INPUT_PRIORITY)) {
                 suppressPhysicalRightClick();
@@ -169,6 +189,9 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
         return hit != null
                 && hit.typeOfHit == MovingObjectPosition.MovingObjectType.BLOCK
                 && hit.getBlockPos() != null && hit.sideHit != null
+                && !AnchorQuarantineRegistry.shared().isQuarantined(this.minecraft.theWorld,
+                        pack(hit.getBlockPos()), hit.sideHit.getIndex(),
+                        this.minecraft.thePlayer.ticksExisted)
                 && NativeBridge.matchesPrePatchIntent(
                         pack(hit.getBlockPos()), hit.sideHit.ordinal());
     }
@@ -191,14 +214,9 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
     }
 
     private void refreshActivePatchesSnapshot() {
-        NativeBridge.beginSimpleAssistPatchFrame();
-        if (PerfectPatch.instance == null
-                || PerfectPatch.instance.getModule(0) == null) {
-            NativeBridge.reconcileSimpleAssistPatchFrame(
-                    this.minecraft.thePlayer == null ? 0 : this.minecraft.thePlayer.ticksExisted);
-            return;
-        }
-        PerfectPatch.instance.invokeModuleCommand(0, 7);
+        // PatchCrumbs publishes the route frame during its own START tick.
+        // 1D only reconciles its optional native capture; it is not the
+        // publisher, because 3D must operate when 1D is deliberately gated.
         NativeBridge.reconcileSimpleAssistPatchFrame(
                 this.minecraft.thePlayer == null ? 0 : this.minecraft.thePlayer.ticksExisted);
     }
@@ -209,6 +227,11 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
         // A request-generation dead end has no pending placement, therefore it
         // cannot be recovered by the confirmation timeout alone.
         int currentTick = this.minecraft.thePlayer == null ? 0 : this.minecraft.thePlayer.ticksExisted;
+        if (isThreeDimensionalMode() && (!hasPrePatchFlow() || hasPriority3DRoute())) {
+            releaseInput();
+            clearCapturedPatch();
+            return;
+        }
         if (this.minecraft.thePlayer != null && this.minecraft.thePlayer.isUsingItem()) {
             NativeBridge.suspendSimpleAssistWatchdog(currentTick);
         } else {
@@ -295,6 +318,9 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
     }
 
     protected boolean arbitratePatchUnderCrosshair() {
+        if (isThreeDimensionalMode() && hasPriority3DRoute()) {
+            return false;
+        }
         MovingObjectPosition hit = interactionHit();
         long packedHit = hit != null
                 && hit.typeOfHit == MovingObjectPosition.MovingObjectType.BLOCK
@@ -303,6 +329,8 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
         int result = NativeBridge.arbitrateSimpleAssistPatch(packedHit, hitFace,
                 this.minecraft.thePlayer.posX, this.minecraft.thePlayer.posY,
                 this.minecraft.thePlayer.posZ, this.minecraft.thePlayer.ticksExisted);
+        if (result == 2) this.prePatchExecution = true;
+        else if (result == 1) this.prePatchExecution = false;
         if (result != 0) NativeBridge.resetSimpleAssistRequestMisses();
         return result != 0;
     }
@@ -346,10 +374,8 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
 
     /** Execution geometry: choose a visible support face before native request scoring. */
     private void captureSpatialExecutionCandidate(long packedTarget) {
-        SpatialAssistanceEngine.TargetPlacement candidate =
-                SpatialAssistanceEngine.findExecutionPlacement(this.minecraft,
-                        BlockPos.fromLong(packedTarget),
-                        this.minecraft.playerController.getBlockReachDistance());
+        SpatialAssistanceEngine.TargetPlacement candidate = SpatialAssistanceEngine.findExecutionPlacement(this.minecraft,
+                BlockPos.fromLong(packedTarget), this.minecraft.playerController.getBlockReachDistance());
         if (candidate == null) return;
         BlockPos support = candidate.getAnchorNode();
         Vec3 hitVec = candidate.getHitVector();
@@ -415,6 +441,9 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
                 && (Boolean.TRUE.equals(PerfectPatch.instance.invokeModuleCommand(0, 8))
                 || NativeBridge.simpleAssistPatchCount() > 0);
         boolean prePatch = hasPrePatchIntentUnderCrosshair();
+        if (isThreeDimensionalMode()) {
+            return !hasPriority3DRoute() && (prePatch || this.prePatchExecution);
+        }
         return realCrumb || prePatch || NativeBridge.isSimpleAssistCaptured();
     }
 
@@ -485,6 +514,8 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
         this.minecraft.thePlayer.swingItem();
         NativeBridge.beginSimpleAssistPlacement(target,
                 expectedBlockId, currentTick);
+        AnchorQuarantineRegistry.shared().expectAssistedPlacement(target,
+                face.getIndex(), expectedBlockId, currentTick);
         NativeBridge.setSimpleAssistPreview(Long.MIN_VALUE);
     }
 
@@ -525,6 +556,7 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
     }
 
     private void clearCapturedPatch() {
+        this.prePatchExecution = false;
         NativeBridge.resetSimpleAssist();
         NativeBridge.resetSimpleAssistRequestMisses();
     }
@@ -550,7 +582,8 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
     @XenonEvent
     @SubscribeEvent
     public void onRenderWorld(RenderWorldLastEvent event) {
-        if (!this.enabled || isThreeDimensionalMode() || !NativeBridge.isNativeAvailable()
+        if (!this.enabled || (isThreeDimensionalMode() && !this.prePatchExecution)
+                || !NativeBridge.isNativeAvailable()
                 || this.minecraft.thePlayer == null) {
             return;
         }
@@ -612,6 +645,19 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
 
     private boolean isThreeDimensionalMode() {
         return setting(SETTING_EXECUTION_MODE).getModeIndex() == 1;
+    }
+
+
+    private boolean hasPrePatchFlow() {
+        return this.prePatchExecution || (this.minecraft.thePlayer != null
+                && this.minecraft.theWorld != null && hasPrePatchIntentUnderCrosshair());
+    }
+
+    /** A real, route-valid 3D PatchCrumbs objective always wins admission. */
+    private boolean hasPriority3DRoute() {
+        if (!isThreeDimensionalMode() || PerfectPatch.instance == null
+                || PerfectPatch.instance.getModule(10) == null) return false;
+        return Boolean.TRUE.equals(PerfectPatch.instance.invokeModuleCommand(10, 22));
     }
 
     /** The parent toggle owns exactly one executor; 1D itself is gated above. */

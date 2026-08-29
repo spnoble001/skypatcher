@@ -25,6 +25,7 @@ import perfectpathc.dev.modules.impl.utils.GlobalSpatialAssistance;
 import perfectpathc.dev.modules.impl.utils.GlobalNaturalMode;
 import perfectpathc.dev.modules.impl.utils.GlobalRenderHelp;
 import perfectpathc.dev.modules.impl.utils.SimpleAssist3DRoute;
+import perfectpathc.dev.modules.impl.utils.AnchorQuarantineRegistry;
 import perfectpathc.dev.modules.runtime.IModuleEntry;
 
 /**
@@ -34,7 +35,7 @@ import perfectpathc.dev.modules.runtime.IModuleEntry;
  */
 @Mod(keybind = 0)
 public final class SimpleAssist3D extends Module implements RightClickCoordinator.Owner, IModuleEntry {
-    private static final int INPUT_PRIORITY = 32;
+    private static final int INPUT_PRIORITY = 34;
     private static final int PENDING_TIMEOUT_TICKS = 80;
     private static final int ROUTE_WATCHDOG_TIMEOUT_TICKS = 80;
     private static final int REQUEST_MISS_LIMIT = 3;
@@ -70,12 +71,11 @@ public final class SimpleAssist3D extends Module implements RightClickCoordinato
     private long capturedCrumbRevision = -1L;
     /** Last dispatched reactive cell, retained only until local confirmation. */
     private long previewTarget = Long.MIN_VALUE;
-    /** True only while this cursor was admitted by PrePatch's own live intent. */
-    private boolean prePatchCursor;
-    private long prePatchOrigin = Long.MIN_VALUE;
-    private long prePatchTerminal = Long.MIN_VALUE;
-    private int prePatchFace = -1;
     private int depthAnchor;
+    /** Confirmed consecutive advances on the same normal; depth is a two-node manoeuvre. */
+    private int depthRun;
+    private int depthRunSign;
+    private String lastSelectionReason = "idle";
     private ReactiveCandidate retainedCandidate;
     private final long[] pendingTargets = { Long.MIN_VALUE, Long.MIN_VALUE };
     private final int[] pendingBlockIds = { -1, -1 };
@@ -108,6 +108,12 @@ public final class SimpleAssist3D extends Module implements RightClickCoordinato
             onRenderWorld((RenderWorldLastEvent)args[0]);
             return null;
         }
+        // Read-only arbitration probe used by the 1D PrePatch executor.
+        // PrePatch yields only to a real route that can dispatch now.
+        if (commandId == 22) {
+            return Boolean.valueOf(hasRealPatchRoute());
+        }
+        if (commandId == 23) return this.lastSelectionReason;
         // Parent-owned global Spatial Assistance changed.  Do not carry an
         // old token window across the new network policy.
         if (commandId == 21) {
@@ -139,6 +145,8 @@ public final class SimpleAssist3D extends Module implements RightClickCoordinato
         if (!this.enabled || !hasWorld()) return;
         if (event.phase == TickEvent.Phase.START) {
             syncStateFrictionRegistration();
+            AnchorQuarantineRegistry.shared().observe(this.minecraft.theWorld,
+                    this.minecraft.thePlayer.ticksExisted);
             if (this.stateFrictionRegistered) {
                 this.stateDrivenFriction.onTickStart(this.minecraft);
             }
@@ -165,10 +173,9 @@ public final class SimpleAssist3D extends Module implements RightClickCoordinato
         }
         updateNaturalSession();
         if ((this.cursorActive || hasPending()) && !isGoalStillValid()) {
-            // A PrePatch intent can legitimately disappear as soon as the
-            // physical cursor leaves its anchor. A C08 already in flight must
-            // still receive its confirmation/timeout window; only new work is
-            // forbidden after the objective has expired.
+            // A C08 already in flight must still receive its confirmation/
+            // timeout window; only new work is forbidden after its objective
+            // has expired.
             if (hasPending()) {
                 confirmPending();
                 if (hasPending()) return;
@@ -201,6 +208,7 @@ public final class SimpleAssist3D extends Module implements RightClickCoordinato
         if (this.pendingCount >= MAX_CHAINED_PENDING) return;
         if (!hasCredit()) return;
         ReactiveCandidate candidate = selectReactiveCandidate();
+        if (!this.cursorActive) return;
         if (candidate == null) {
             abortAfterMiss();
             return;
@@ -247,29 +255,15 @@ public final class SimpleAssist3D extends Module implements RightClickCoordinato
         int snapshot = SimpleAssistMinecraftAccess.getBlockSnapshot(this.minecraft.theWorld, anchor);
         if (!isAccepted(snapshot)) return;
 
-        if (matchesLivePrePatchIntent(hit)) {
-            long origin = NativeBridge.prePatchActiveIntentOrigin();
-            long terminal = NativeBridge.prePatchActiveIntentTerminal();
-            int face = NativeBridge.prePatchActiveIntentFace();
-            if (origin == Long.MIN_VALUE || terminal != anchor.toLong() || !isHorizontalFace(face)) return;
-            this.prePatchCursor = true;
-            this.prePatchOrigin = origin;
-            this.prePatchTerminal = terminal;
-            this.prePatchFace = face;
-            this.goalCrumb = BlockPos.fromLong(origin);
-            this.goalNorthSouth = face == EnumFacing.EAST.getIndex() || face == EnumFacing.WEST.getIndex();
-            this.capturedCrumbRevision = -1L;
-        } else {
-            long crumbPacked = NativeBridge.patchCrumbPackedPos(System.currentTimeMillis());
-            if (crumbPacked == Long.MIN_VALUE) return;
-            this.prePatchCursor = false;
-            this.prePatchOrigin = Long.MIN_VALUE;
-            this.prePatchTerminal = Long.MIN_VALUE;
-            this.prePatchFace = -1;
-            this.goalCrumb = BlockPos.fromLong(crumbPacked);
-            this.goalNorthSouth = (NativeBridge.patchCrumbFlags() & (1 << 2)) != 0;
-            this.capturedCrumbRevision = NativeBridge.patchCrumbRevision();
-        }
+        // PrePatch already owns a linear terminal-to-origin contract and is
+        // always executed by SimpleAssist 1D. A real crumb, however, admits
+        // every accepted anchor in its guide band; restricting this to a
+        // scanned terminal destroys the reactive 3D route surface.
+        long crumbPacked = NativeBridge.patchCrumbPackedPos(System.currentTimeMillis());
+        if (crumbPacked == Long.MIN_VALUE) return;
+        this.goalCrumb = BlockPos.fromLong(crumbPacked);
+        this.goalNorthSouth = (NativeBridge.patchCrumbFlags() & (1 << 2)) != 0;
+        this.capturedCrumbRevision = NativeBridge.patchCrumbRevision();
         if (!SimpleAssist3DRoute.isWithinGuideBand(anchor, this.goalCrumb, this.goalNorthSouth)) return;
         this.lastConfirmed = anchor;
         this.cursorActive = true;
@@ -285,14 +279,6 @@ public final class SimpleAssist3D extends Module implements RightClickCoordinato
      */
     private boolean isGoalStillValid() {
         if (this.goalCrumb == null) return false;
-        if (this.prePatchCursor) {
-            // PrePatch remains the owner of its scan and spread.  Keep this
-            // cursor only while that exact immutable terminal/origin/face is
-            // still the live intent; a retarget is a fresh user action.
-            return NativeBridge.prePatchActiveIntentOrigin() == this.prePatchOrigin
-                    && NativeBridge.prePatchActiveIntentTerminal() == this.prePatchTerminal
-                    && NativeBridge.prePatchActiveIntentFace() == this.prePatchFace;
-        }
         long currentRevision = NativeBridge.patchCrumbRevision();
         if (currentRevision == this.capturedCrumbRevision) return true;
 
@@ -327,43 +313,78 @@ public final class SimpleAssist3D extends Module implements RightClickCoordinato
                 });
     }
 
-    private boolean matchesLivePrePatchIntent(MovingObjectPosition hit) {
-        return hit != null && hit.getBlockPos() != null && hit.sideHit != null
-                && NativeBridge.matchesPrePatchIntent(hit.getBlockPos().toLong(), hit.sideHit.getIndex());
+    private boolean hasRealPatchRoute() {
+        if (!this.enabled || !hasWorld() || !isPatchBlockHeld()) return false;
+        if (this.cursorActive || hasPending()) {
+            BlockPos base = this.pendingCount == 0 ? this.lastConfirmed
+                    : BlockPos.fromLong(this.pendingTargets[this.pendingCount - 1]);
+            return base != null && findBestReactiveCandidate(base, Long.MIN_VALUE) != null;
+        }
+
+        MovingObjectPosition hit = activationHit();
+        if (hit == null || hit.typeOfHit != MovingObjectPosition.MovingObjectType.BLOCK
+                || hit.getBlockPos() == null) return false;
+        BlockPos anchor = hit.getBlockPos();
+        if (!isAccepted(SimpleAssistMinecraftAccess.getBlockSnapshot(this.minecraft.theWorld, anchor))) {
+            return false;
+        }
+        long crumbPacked = NativeBridge.patchCrumbPackedPos(System.currentTimeMillis());
+        if (crumbPacked == Long.MIN_VALUE) return false;
+        BlockPos crumb = BlockPos.fromLong(crumbPacked);
+        boolean northSouth = (NativeBridge.patchCrumbFlags() & (1 << 2)) != 0;
+        if (!SimpleAssist3DRoute.isWithinGuideBand(anchor, crumb, northSouth)) return false;
+        return hasExecutableCandidate(anchor, crumb, northSouth);
     }
 
-    private static boolean isHorizontalFace(int face) {
-        return face == EnumFacing.NORTH.getIndex() || face == EnumFacing.SOUTH.getIndex()
-                || face == EnumFacing.EAST.getIndex() || face == EnumFacing.WEST.getIndex();
+    /** Probes the unchanged reactive selector without capturing or reserving input. */
+    private boolean hasExecutableCandidate(BlockPos base, BlockPos crumb, boolean northSouth) {
+        BlockPos savedGoal = this.goalCrumb;
+        boolean savedNorthSouth = this.goalNorthSouth;
+        int savedDepthAnchor = this.depthAnchor;
+        try {
+            this.goalCrumb = crumb;
+            this.goalNorthSouth = northSouth;
+            this.depthAnchor = depthCoordinate(base);
+            return findBestReactiveCandidate(base, Long.MIN_VALUE) != null;
+        } finally {
+            this.goalCrumb = savedGoal;
+            this.goalNorthSouth = savedNorthSouth;
+            this.depthAnchor = savedDepthAnchor;
+        }
     }
 
-    /**
-     * Keeps a physically revalidated intent for a short window. This avoids
-     * thrashing between nearly equal faces while never reusing stale reach,
-     * line-of-sight or support data.
-     */
+    /** Keeps a physically revalidated intent for a short window. */
     private ReactiveCandidate selectReactiveCandidate() {
         BlockPos base = this.pendingCount == 0 ? this.lastConfirmed
                 : BlockPos.fromLong(this.pendingTargets[this.pendingCount - 1]);
         if (base == null) return null;
+
+        ReactiveCandidate challenger = findBestReactiveCandidate(base, Long.MIN_VALUE);
+        if (challenger != null && BlockPos.fromLong(challenger.target).getY() == this.goalCrumb.getY()) {
+            this.lastSelectionReason = "direct-plane";
+            this.retainedCandidate = challenger;
+            return challenger;
+        }
+
         ReactiveCandidate retained = revalidateRetainedCandidate(base);
         int tick = this.minecraft.thePlayer.ticksExisted;
         if (retained != null && tick - retained.createdTick < CANDIDATE_STICKY_TICKS) {
+            this.lastSelectionReason = "retained";
             this.retainedCandidate = retained;
             return retained;
         }
-        ReactiveCandidate challenger = findBestReactiveCandidate(base, Long.MIN_VALUE);
         double replaceRatio = isNatural() ? NATURAL_REPLACE_RATIO : CANDIDATE_REPLACE_RATIO;
         if (retained != null && (challenger == null
                 || challenger.score >= retained.score * replaceRatio)) {
+            this.lastSelectionReason = "hysteresis";
             this.retainedCandidate = retained;
             return retained;
         }
         this.retainedCandidate = challenger;
+        this.lastSelectionReason = challenger == null ? "no-physical-candidate" : "maneuver";
         return challenger;
     }
 
-    /** Rechecks a retained target with live physical state, never cached geometry. */
     private ReactiveCandidate revalidateRetainedCandidate(BlockPos base) {
         if (this.retainedCandidate == null || this.retainedCandidate.base != base.toLong()) return null;
         return findBestReactiveCandidate(base, this.retainedCandidate.target);
@@ -376,19 +397,26 @@ public final class SimpleAssist3D extends Module implements RightClickCoordinato
         Vec3 eye = currentEyePosition();
         Vec3 predictedEye = predictedEyePosition(eye);
         Vec3 look = this.minecraft.thePlayer.getLookVec();
+        boolean directPlaneAvailable = hasDirectPlaneCandidate(base, requiredTarget,
+                currentDistance, currentDepthCost);
         ReactiveCandidate best = null;
         double bestScore = Double.MAX_VALUE;
+        ReactiveCandidate bestExactPlane = null;
+        double bestExactPlaneScore = Double.MAX_VALUE;
+        ReactiveCandidate soleDirect = null;
+        int directCount = 0;
         for (EnumFacing step : EnumFacing.VALUES) {
             boolean depthStep = isDepthFacing(step);
+            if (depthStep && this.depthRun >= 2
+                    && Integer.signum(step.getFrontOffsetX() + step.getFrontOffsetZ()) == this.depthRunSign) continue;
             BlockPos target = depthStep ? base.offset(step, DEPTH_LEAD_BLOCKS) : base.offset(step);
             if (requiredTarget != Long.MIN_VALUE && target.toLong() != requiredTarget) continue;
+            if (directPlaneAvailable && (depthStep || target.getY() != this.goalCrumb.getY())) continue;
             if (!SimpleAssist3DRoute.isWithinGuideBand(target, this.goalCrumb, this.goalNorthSouth)) continue;
             if (!isReplaceable(SimpleAssistMinecraftAccess.getBlockSnapshot(this.minecraft.theWorld, target))) continue;
             double progress = goalDistance(target);
             double depthCost = depthLeadCost(target);
-            boolean improvesMeta = progress < currentDistance;
-            boolean improvesDepth = progress == currentDistance && depthCost < currentDepthCost;
-            if (!improvesMeta && !improvesDepth) continue;
+            if (!(progress < currentDistance || progress == currentDistance && depthCost < currentDepthCost)) continue;
             if (!hasValidDepthParity(target)) continue;
             boolean horizontal = target.getY() == base.getY() && !depthStep;
             EnumFacing sidePolicy = horizontal ? allowedGuideSide() : null;
@@ -399,6 +427,7 @@ public final class SimpleAssist3D extends Module implements RightClickCoordinato
                     depthStep ? null : queuedSupport, GlobalSpatialAssistance.isEnabled(),
                     depthStep ? null : step);
             if (placement == null) continue;
+            if (depthStep && goalDistance(target) != 0.0D && !hasForwardExit(target)) continue;
             Vec3 hit = placement.getHitVector();
             // The engine has already approved the real eye position. Lead
             // targeting influences only preference, never authorization.
@@ -415,8 +444,62 @@ public final class SimpleAssist3D extends Module implements RightClickCoordinato
                 best = new ReactiveCandidate(base.toLong(), target.toLong(), placement, score,
                         this.minecraft.thePlayer.ticksExisted);
             }
+            // A physically executable closure on the crumb's actual plane
+            // dominates the ±1 vertical rescue band.  The latter remains
+            // available only when no direct plane placement exists.
+            if (target.getY() == this.goalCrumb.getY() && score < bestExactPlaneScore) {
+                bestExactPlaneScore = score;
+                bestExactPlane = new ReactiveCandidate(base.toLong(), target.toLong(), placement, score,
+                        this.minecraft.thePlayer.ticksExisted);
+            }
+            // Degenerate 1D case: one exact-plane continuation means there
+            // is no spatial decision to optimise. Preserve the deterministic
+            // direct behaviour and reserve reactive scoring for a real fork.
+            if (!depthStep && target.getY() == this.goalCrumb.getY()) {
+                directCount++;
+                soleDirect = new ReactiveCandidate(base.toLong(), target.toLong(), placement, score,
+                        this.minecraft.thePlayer.ticksExisted);
+            }
         }
-        return best;
+        return directCount == 1 ? soleDirect : bestExactPlane != null ? bestExactPlane : best;
+    }
+
+    /** Cheap first pass: direct-plane geometry decides whether 3D expansion is needed at all. */
+    private boolean hasDirectPlaneCandidate(BlockPos base, long requiredTarget,
+                                            double currentDistance, double currentDepthCost) {
+        for (EnumFacing step : EnumFacing.VALUES) {
+            if (isDepthFacing(step)) continue;
+            BlockPos target = base.offset(step);
+            if (target.getY() != this.goalCrumb.getY()
+                    || requiredTarget != Long.MIN_VALUE && target.toLong() != requiredTarget
+                    || !SimpleAssist3DRoute.isWithinGuideBand(target, this.goalCrumb, this.goalNorthSouth)
+                    || !isReplaceable(SimpleAssistMinecraftAccess.getBlockSnapshot(this.minecraft.theWorld, target))
+                    || !hasValidDepthParity(target)) continue;
+            double progress = goalDistance(target);
+            if (!(progress < currentDistance || progress == currentDistance
+                    && depthLeadCost(target) < currentDepthCost)) continue;
+            boolean horizontal = target.getY() == base.getY();
+            if (horizontal && allowedGuideSide() != step) continue;
+            if (SpatialAssistanceEngine.findExecutionPlacement(this.minecraft, target,
+                    this.minecraft.playerController.getBlockReachDistance(),
+                    this.pendingCount == 0 ? null : base, GlobalSpatialAssistance.isEnabled(), step) != null) return true;
+        }
+        return false;
+    }
+
+    /** A depth manoeuvre is admitted only when it already exposes a real exit. */
+    private boolean hasForwardExit(BlockPos from) {
+        double distance = goalDistance(from);
+        for (EnumFacing step : EnumFacing.VALUES) {
+            boolean depth = isDepthFacing(step);
+            BlockPos next = depth ? from.offset(step, DEPTH_LEAD_BLOCKS) : from.offset(step);
+            if (!SimpleAssist3DRoute.isWithinGuideBand(next, this.goalCrumb, this.goalNorthSouth)
+                    || !isReplaceable(SimpleAssistMinecraftAccess.getBlockSnapshot(this.minecraft.theWorld, next))
+                    || !hasValidDepthParity(next) || goalDistance(next) >= distance) continue;
+            if (SpatialAssistanceEngine.findExecutionPlacement(this.minecraft, next,
+                    this.minecraft.playerController.getBlockReachDistance()) != null) return true;
+        }
+        return false;
     }
 
     private boolean isDepthFacing(EnumFacing side) {
@@ -596,14 +679,6 @@ public final class SimpleAssist3D extends Module implements RightClickCoordinato
 
     /** Only build from the side of the PatchCrumbs dividing plane occupied by the player. */
     private EnumFacing allowedGuideSide() {
-        // PrePatch already selected the exposed terminal face and published an
-        // immutable origin in precisely that outward direction.  Reapplying
-        // the PatchCrumbs player-quadrant rule here would invert EAST/WEST
-        // (or NORTH/SOUTH) whenever the player stands on the other side of
-        // the synthetic origin.
-        if (this.prePatchCursor && isHorizontalFace(this.prePatchFace)) {
-            return EnumFacing.getFront(this.prePatchFace);
-        }
         if (this.goalCrumb == null) return null;
         if (this.goalNorthSouth) {
             double plane = this.goalCrumb.getX() + 0.5D;
@@ -640,6 +715,8 @@ public final class SimpleAssist3D extends Module implements RightClickCoordinato
         this.pendingBlockIds[this.pendingCount] = SimpleAssistMinecraftAccess.getHeldBlockId(held);
         this.pendingSinceTicks[this.pendingCount] = this.minecraft.thePlayer.ticksExisted;
         this.pendingCount++;
+        AnchorQuarantineRegistry.shared().expectAssistedPlacement(target, face.getIndex(),
+                this.pendingBlockIds[this.pendingCount - 1], this.minecraft.thePlayer.ticksExisted);
         this.lastProgressTick = this.minecraft.thePlayer.ticksExisted;
         this.requestMisses = 0;
         if (isNatural()) {
@@ -676,7 +753,14 @@ public final class SimpleAssist3D extends Module implements RightClickCoordinato
                     this.previewTarget = this.pendingCount > 1
                             ? this.pendingTargets[1] : Long.MIN_VALUE;
                 }
-                this.lastConfirmed = BlockPos.fromLong(this.pendingTargets[0]);
+                BlockPos confirmed = BlockPos.fromLong(this.pendingTargets[0]);
+                if (this.lastConfirmed != null) {
+                    int delta = depthCoordinate(confirmed) - depthCoordinate(this.lastConfirmed);
+                    int sign = Integer.signum(delta);
+                    if (sign != 0) this.depthRun = sign == this.depthRunSign ? this.depthRun + 1 : 1;
+                    else { this.depthRun = 0; this.depthRunSign = 0; }
+                }
+                this.lastConfirmed = confirmed;
                 shiftPending();
                 this.requestMisses = 0;
                 this.lastProgressTick = currentTick;
@@ -688,18 +772,11 @@ public final class SimpleAssist3D extends Module implements RightClickCoordinato
     }
 
     private void reserveInputIfNeeded() {
-        if ((this.cursorActive || hasPending() || canCaptureCursor()) && isPatchBlockHeld()) {
+        if (hasRealPatchRoute()) {
             if (RightClickCoordinator.acquire(this, INPUT_PRIORITY)) suppressPhysicalRightClick();
         } else if (RightClickCoordinator.isOwner(this)) {
             releaseInput();
         }
-    }
-
-    private boolean canCaptureCursor() {
-        MovingObjectPosition hit = activationHit();
-        if (hit == null || hit.typeOfHit != MovingObjectPosition.MovingObjectType.BLOCK) return false;
-        return matchesLivePrePatchIntent(hit)
-                || NativeBridge.patchCrumbPackedPos(System.currentTimeMillis()) != Long.MIN_VALUE;
     }
 
     private void refillCredits() {
@@ -764,12 +841,10 @@ public final class SimpleAssist3D extends Module implements RightClickCoordinato
     private void reset() {
         this.spatial.reset(); this.cursorActive = false; this.lastConfirmed = null;
         this.goalCrumb = null; this.goalNorthSouth = false; this.depthAnchor = 0;
+        this.depthRun = 0; this.depthRunSign = 0;
+        this.lastSelectionReason = "idle";
         this.previewTarget = Long.MIN_VALUE;
         this.capturedCrumbRevision = -1L;
-        this.prePatchCursor = false;
-        this.prePatchOrigin = Long.MIN_VALUE;
-        this.prePatchTerminal = Long.MIN_VALUE;
-        this.prePatchFace = -1;
         this.retainedCandidate = null;
         this.pendingCount = 0;
         for (int index = 0; index < MAX_CHAINED_PENDING; index++) {

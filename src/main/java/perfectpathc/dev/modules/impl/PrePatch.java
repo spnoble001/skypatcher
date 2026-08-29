@@ -28,6 +28,7 @@ import perfectpathc.dev.modules.impl.events.XenonEvent;
 import perfectpathc.dev.modules.impl.ui.ClickGuiObj;
 import perfectpathc.dev.modules.impl.utils.GlobalCps;
 import perfectpathc.dev.modules.impl.utils.RightClickCoordinator;
+import perfectpathc.dev.modules.impl.utils.AnchorQuarantineRegistry;
 
 import java.util.Arrays;
 
@@ -269,6 +270,10 @@ public final class PrePatch extends Module implements RightClickCoordinator.Owne
             return false;
         }
         BlockPos position = hit.getBlockPos();
+        if (AnchorQuarantineRegistry.shared().isQuarantined(this.minecraft.theWorld,
+                position.toLong(), face, this.minecraft.thePlayer.ticksExisted)) {
+            return false;
+        }
         this.scanCursor.set(position.getX(), position.getY(), position.getZ());
         return this.minecraft.theWorld.isBlockLoaded(this.scanCursor)
                 && this.minecraft.theWorld.getBlockState(this.scanCursor).getBlock() == Blocks.obsidian
@@ -278,6 +283,19 @@ public final class PrePatch extends Module implements RightClickCoordinator.Owne
     }
 
     private void click() {
+        // This is PrePatch's own synthetic click path.  Capture a short-lived
+        // expectation before injecting it; quarantine still starts only once
+        // observe() sees the resulting block in the local world.
+        MovingObjectPosition hit = this.minecraft.objectMouseOver;
+        ItemBlock heldBlock = this.minecraft.thePlayer.getHeldItem() != null
+                && this.minecraft.thePlayer.getHeldItem().getItem() instanceof ItemBlock
+                ? (ItemBlock)this.minecraft.thePlayer.getHeldItem().getItem() : null;
+        if (hit != null && hit.typeOfHit == MovingObjectPosition.MovingObjectType.BLOCK
+                && hit.getBlockPos() != null && hit.sideHit != null && heldBlock != null) {
+            AnchorQuarantineRegistry.shared().expectPrePatchPlacement(
+                    hit.getBlockPos().offset(hit.sideHit).toLong(), hit.sideHit.getIndex(),
+                    Block.getIdFromBlock(heldBlock.getBlock()), this.minecraft.thePlayer.ticksExisted);
+        }
         int useKey = this.minecraft.gameSettings.keyBindUseItem.getKeyCode();
         KeyBinding.setKeyBindState(useKey, true);
         KeyBinding.onTick(useKey);
@@ -331,6 +349,8 @@ public final class PrePatch extends Module implements RightClickCoordinator.Owne
             // a fresh WorldClient instance.
             clearAnchors();
         }
+        AnchorQuarantineRegistry.shared().observe(this.minecraft.theWorld,
+                this.minecraft.thePlayer.ticksExisted);
         boolean eastWest = setting(1).getModeIndex() == 0;
         int centerX = (int)Math.floor(this.minecraft.thePlayer.posX);
         int centerY = (int)Math.floor(this.minecraft.thePlayer.posY);
@@ -418,12 +438,15 @@ public final class PrePatch extends Module implements RightClickCoordinator.Owne
         int y = unpackY(packed);
         int z = unpackZ(packed);
         this.scanCursor.set(x, y, z);
+        long position = this.scanCursor.toLong();
         boolean valid = this.minecraft.theWorld.isBlockLoaded(this.scanCursor)
                 && this.minecraft.theWorld.getBlockState(this.scanCursor).getBlock()
                 == Blocks.obsidian;
-        boolean firstExposed = valid && isFaceExposed(
+        boolean firstExposed = valid && !isQuarantined(position, eastWest ? EnumFacing.EAST : EnumFacing.NORTH)
+                && isFaceExposed(
                 x, y, z, eastWest ? 1 : 0, eastWest ? 0 : -1);
-        boolean secondExposed = valid && isFaceExposed(
+        boolean secondExposed = valid && !isQuarantined(position, eastWest ? EnumFacing.WEST : EnumFacing.SOUTH)
+                && isFaceExposed(
                 x, y, z, eastWest ? -1 : 0, eastWest ? 0 : 1);
         int result = WORK_LOCAL_REFRESH_RESULT
                 | (valid ? 1 : 0)
@@ -461,8 +484,10 @@ public final class PrePatch extends Module implements RightClickCoordinator.Owne
         }
         long packed = this.scanCursor.toLong();
         NativeBridge.submitPrePatchScanCandidate(packed,
-                isFaceExposed(x, y, z, eastWest ? 1 : 0, eastWest ? 0 : -1),
-                isFaceExposed(x, y, z, eastWest ? -1 : 0, eastWest ? 0 : 1));
+                !isQuarantined(packed, eastWest ? EnumFacing.EAST : EnumFacing.NORTH)
+                        && isFaceExposed(x, y, z, eastWest ? 1 : 0, eastWest ? 0 : -1),
+                !isQuarantined(packed, eastWest ? EnumFacing.WEST : EnumFacing.SOUTH)
+                        && isFaceExposed(x, y, z, eastWest ? -1 : 0, eastWest ? 0 : 1));
     }
 
     private static long[] buildScanOffsetsByDistance() {
@@ -510,7 +535,15 @@ public final class PrePatch extends Module implements RightClickCoordinator.Owne
     }
 
     public boolean isVisibleAnchor(long position, int face) {
-        return NativeBridge.hasPrePatchVisibleAnchor(position, face);
+        return this.minecraft.theWorld != null && this.minecraft.thePlayer != null
+                && !AnchorQuarantineRegistry.shared().isQuarantined(this.minecraft.theWorld,
+                position, face, this.minecraft.thePlayer.ticksExisted)
+                && NativeBridge.hasPrePatchVisibleAnchor(position, face);
+    }
+
+    private boolean isQuarantined(long position, EnumFacing face) {
+        return AnchorQuarantineRegistry.shared().isQuarantined(this.minecraft.theWorld,
+                position, face.getIndex(), this.minecraft.thePlayer.ticksExisted);
     }
 
     public boolean isManualInputSatisfied() {

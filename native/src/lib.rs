@@ -1229,6 +1229,12 @@ extern "system" fn dispatch2(
             );
             0
         }
+        240 => {
+            Java_perfectpathc_dev_nativecore_NativeBridge_retargetSimpleAssistPrePatchNative(
+                env, class, first,
+            );
+            0
+        }
         230 => Java_perfectpathc_dev_nativecore_NativeBridge_prePatchDiagnosticTimingNative(
             env, class, first,
         ),
