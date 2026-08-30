@@ -1,5 +1,5 @@
-use jni::objects::{JClass, JLongArray, JObject, JString, JValue};
-use jni::sys::{jboolean, jfloat, jint, jlong, jlongArray, JNI_VERSION_1_8};
+use jni::objects::{JByteArray, JClass, JLongArray, JObject, JString, JValue};
+use jni::sys::{jboolean, jbyteArray, jfloat, jint, jlong, jlongArray, JNI_VERSION_1_8};
 use jni::{JNIEnv, JavaVM};
 use std::ffi::c_void;
 use std::sync::atomic::Ordering;
@@ -13,14 +13,13 @@ use std::sync::{Mutex, OnceLock};
  */
 const SMART_PEARL_ASCENT_FALL_TOLERANCE: f64 = 2.0;
 
-mod anti_fall;
 mod lifecycle;
 mod license;
+mod payload;
 mod patch_crumbs;
 mod pre_patch;
 mod simple_assist;
 
-use anti_fall::*;
 use patch_crumbs::*;
 use pre_patch::*;
 use simple_assist::*;
@@ -170,6 +169,27 @@ fn jvm_system_property(vm: &JavaVM, key: &str) -> Option<String> {
     let value = JString::from(value);
     let value = env.get_string(&value).ok()?;
     Some(value.to_string_lossy().into_owned())
+}
+
+/** Delivers the payload only after native license verification succeeds. */
+#[no_mangle]
+pub unsafe extern "system" fn Java_perfectpathc_dev_nativecore_NativeBridge_decryptPayload(
+    mut env: JNIEnv,
+    _class: JClass,
+    encrypted: jbyteArray,
+) -> jbyteArray {
+    let input = JByteArray::from_raw(encrypted);
+    let Ok(length) = env.get_array_length(&input) else { return std::ptr::null_mut(); };
+    if length <= 0 || length > 4 * 1024 * 1024 { return std::ptr::null_mut(); }
+    let mut bytes = vec![0i8; length as usize];
+    if env.get_byte_array_region(&input, 0, &mut bytes).is_err() {
+        return std::ptr::null_mut();
+    }
+    let encrypted: Vec<u8> = bytes.iter().map(|value| *value as u8).collect();
+    let Some(payload) = payload::decrypt(&encrypted) else { return std::ptr::null_mut(); };
+    env.byte_array_from_slice(&payload)
+        .map(|array| array.into_raw())
+        .unwrap_or(std::ptr::null_mut())
 }
 
 /** The sole Java JNI entry point. `convert_long_array` copies the JVM array,
@@ -352,6 +372,7 @@ extern "system" fn dispatch4(
     fourth: jlong,
 ) -> jlong {
     match opcode {
+        88 => equipo_add_named(first, second, third, fourth) as jlong,
         214 => {
             Java_perfectpathc_dev_nativecore_NativeBridge_submitPatchCrumbScanLaneNative(
                 env, class, first, second, third, fourth,
@@ -442,32 +463,6 @@ extern "system" fn dispatch16(
             f32::from_bits(fifteenth as u32),
             f32::from_bits(sixteenth as u32),
         ),
-        222 => Java_perfectpathc_dev_nativecore_NativeBridge_nextAntiFallActionNative(
-            env,
-            class,
-            (first & 1 != 0) as jboolean,
-            f32::from_bits(second as u32),
-            f32::from_bits((second >> 32) as u32),
-            f32::from_bits(third as u32),
-            f32::from_bits((third >> 32) as u32),
-            f64::from_bits(fifth as u64),
-            f64::from_bits(sixth as u64),
-            f64::from_bits(seventh as u64),
-            f64::from_bits(eighth as u64),
-            f64::from_bits(ninth as u64),
-            f64::from_bits(tenth as u64),
-            f64::from_bits(eleventh as u64),
-            f64::from_bits(twelfth as u64),
-            (first & 2 != 0) as jboolean,
-            (first & 4 != 0) as jboolean,
-            (first & 8 != 0) as jboolean,
-            f32::from_bits(fourth as u32),
-            (first & 16 != 0) as jboolean,
-            (first & 32 != 0) as jboolean,
-            thirteenth,
-            fourteenth,
-            fifteenth,
-        ) as jlong,
         _ => 0,
     }
 }
@@ -885,20 +880,11 @@ extern "system" fn dispatch0(env: JNIEnv, class: JClass, opcode: jint) -> jlong 
             Java_perfectpathc_dev_nativecore_NativeBridge_initializeEquipoNative(env, class);
             0
         }
+        84 => equipo_member_count() as jlong,
         98 => Java_perfectpathc_dev_nativecore_NativeBridge_isThrowPotActiveNative(env, class)
             as jlong,
         99 => {
             Java_perfectpathc_dev_nativecore_NativeBridge_resetThrowPotNative(env, class);
-            0
-        }
-        112 => Java_perfectpathc_dev_nativecore_NativeBridge_antiFallMotionXNative(env, class)
-            .to_bits() as jlong,
-        113 => Java_perfectpathc_dev_nativecore_NativeBridge_antiFallMotionZNative(env, class)
-            .to_bits() as jlong,
-        114 => Java_perfectpathc_dev_nativecore_NativeBridge_antiFallStrategyNative(env, class)
-            as jlong,
-        115 => {
-            Java_perfectpathc_dev_nativecore_NativeBridge_resetAntiFallNative(env, class);
             0
         }
         128 => {
@@ -1094,6 +1080,9 @@ extern "system" fn dispatch2(
         83 => Java_perfectpathc_dev_nativecore_NativeBridge_equipoRemoveNative(
             env, class, first, second,
         ) as jlong,
+        85 => equipo_member_bits(first as usize, true),
+        86 => equipo_member_bits(first as usize, false),
+        87 => equipo_member_name_chunk(first as usize, second as usize),
         169 => Java_perfectpathc_dev_nativecore_NativeBridge_hasSimpleAssistGraceNative(
             env,
             class,
@@ -1291,7 +1280,6 @@ pub extern "system" fn Java_perfectpathc_dev_nativecore_NativeBridge_quiesceNati
     // Reject new guarded entries, then wait for in-flight JNI calls to leave the .so.
     lifecycle::wait_until_idle();
 
-    anti_fall::quiesce();
     simple_assist::quiesce();
     patch_crumbs::quiesce();
     pre_patch::quiesce();
@@ -1391,10 +1379,11 @@ pub extern "system" fn Java_perfectpathc_dev_nativecore_NativeBridge_packBlockFl
     (face & 0xF) | ((action & 0xF) << 4) | ((ticks & 0xFF) << 8)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct TeamMember {
     most: i64,
     least: i64,
+    name: String,
 }
 
 struct ThrowPotState {
@@ -2306,9 +2295,9 @@ pub extern "system" fn Java_perfectpathc_dev_nativecore_NativeBridge_initializeE
 ) {
     crate::lifecycle::jni_guarded!();
 
-    let state = EQUIPO_STATE.get_or_init(|| Mutex::new(load_equipo()));
+    let state = EQUIPO_STATE.get_or_init(|| Mutex::new(Vec::new()));
     if let Ok(mut state) = state.lock() {
-        *state = load_equipo();
+        state.clear();
     }
 }
 
@@ -2331,7 +2320,7 @@ pub extern "system" fn Java_perfectpathc_dev_nativecore_NativeBridge_equipoAddNa
 ) -> jboolean {
     crate::lifecycle::jni_guarded!(0);
 
-    let state = EQUIPO_STATE.get_or_init(|| Mutex::new(load_equipo()));
+    let state = EQUIPO_STATE.get_or_init(|| Mutex::new(Vec::new()));
     let Ok(mut state) = state.lock() else {
         return 0;
     };
@@ -2339,10 +2328,90 @@ pub extern "system" fn Java_perfectpathc_dev_nativecore_NativeBridge_equipoAddNa
         .iter()
         .any(|member| member.most == most && member.least == least);
     if added {
-        state.push(TeamMember { most, least });
-        save_equipo(&state);
+        state.push(TeamMember {
+            most,
+            least,
+            name: String::new(),
+        });
     }
     added as jboolean
+}
+
+fn equipo_add_named(most: jlong, least: jlong, first_name: jlong, second_name: jlong) -> bool {
+    let name = unpack_equipo_name(first_name, second_name);
+    let state = EQUIPO_STATE.get_or_init(|| Mutex::new(Vec::new()));
+    let Ok(mut state) = state.lock() else {
+        return false;
+    };
+    if let Some(member) = state
+        .iter_mut()
+        .find(|member| member.most == most && member.least == least)
+    {
+        if !name.is_empty() && member.name != name {
+            member.name = name;
+        }
+        return false;
+    }
+    state.push(TeamMember { most, least, name });
+    true
+}
+
+fn unpack_equipo_name(first: jlong, second: jlong) -> String {
+    let mut name = String::with_capacity(16);
+    for packed in [first as u64, second as u64] {
+        for shift in 0..8 {
+            let value = ((packed >> (shift * 8)) & 0xff) as u8;
+            if value == 0 {
+                return name;
+            }
+            if value.is_ascii_alphanumeric() || value == b'_' {
+                name.push(value as char);
+            } else {
+                return name;
+            }
+        }
+    }
+    name
+}
+
+fn equipo_member_count() -> usize {
+    let state = EQUIPO_STATE.get_or_init(|| Mutex::new(Vec::new()));
+    state.lock().map(|state| state.len()).unwrap_or(0)
+}
+
+fn equipo_member_bits(index: usize, most: bool) -> jlong {
+    let state = EQUIPO_STATE.get_or_init(|| Mutex::new(Vec::new()));
+    state
+        .lock()
+        .ok()
+        .and_then(|state| {
+            state
+                .get(index)
+                .map(|member| if most { member.most } else { member.least })
+        })
+        .unwrap_or(0)
+}
+
+fn equipo_member_name_chunk(index: usize, chunk: usize) -> jlong {
+    if chunk > 1 {
+        return 0;
+    }
+    let state = EQUIPO_STATE.get_or_init(|| Mutex::new(Vec::new()));
+    let Ok(state) = state.lock() else {
+        return 0;
+    };
+    let Some(member) = state.get(index) else {
+        return 0;
+    };
+    let bytes = member.name.as_bytes();
+    let offset = chunk * 8;
+    let mut packed = 0_u64;
+    for index in 0..8 {
+        if let Some(value) = bytes.get(offset + index) {
+            packed |= (*value as u64) << (index * 8);
+        }
+    }
+    packed as jlong
 }
 
 pub extern "system" fn Java_perfectpathc_dev_nativecore_NativeBridge_equipoRemoveNative(
@@ -2353,21 +2422,18 @@ pub extern "system" fn Java_perfectpathc_dev_nativecore_NativeBridge_equipoRemov
 ) -> jboolean {
     crate::lifecycle::jni_guarded!(0);
 
-    let state = EQUIPO_STATE.get_or_init(|| Mutex::new(load_equipo()));
+    let state = EQUIPO_STATE.get_or_init(|| Mutex::new(Vec::new()));
     let Ok(mut state) = state.lock() else {
         return 0;
     };
     let count = state.len();
     state.retain(|member| member.most != most || member.least != least);
     let removed = state.len() != count;
-    if removed {
-        save_equipo(&state);
-    }
     removed as jboolean
 }
 
 fn equipo_contains(most: jlong, least: jlong) -> bool {
-    let state = EQUIPO_STATE.get_or_init(|| Mutex::new(load_equipo()));
+    let state = EQUIPO_STATE.get_or_init(|| Mutex::new(Vec::new()));
     state
         .lock()
         .map(|state| {
@@ -2376,48 +2442,6 @@ fn equipo_contains(most: jlong, least: jlong) -> bool {
                 .any(|member| member.most == most && member.least == least)
         })
         .unwrap_or(false)
-}
-
-fn equipo_path() -> std::path::PathBuf {
-    std::path::PathBuf::from("config/perfectpatch/equipo.txt")
-}
-
-fn load_equipo() -> Vec<TeamMember> {
-    let Ok(contents) = std::fs::read_to_string(equipo_path()) else {
-        return Vec::new();
-    };
-    contents
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.splitn(3, '\t');
-            let first = fields.next()?;
-            let second = fields.next()?;
-            if let (Ok(most), Ok(least)) = (first.parse(), second.parse()) {
-                return Some(TeamMember { most, least });
-            }
-            // Also accept the previous Java UUID<TAB>name format.
-            let bits = u128::from_str_radix(&first.replace('-', ""), 16).ok()?;
-            Some(TeamMember {
-                most: (bits >> 64) as u64 as i64,
-                least: bits as u64 as i64,
-            })
-        })
-        .collect()
-}
-
-fn save_equipo(members: &[TeamMember]) {
-    let path = equipo_path();
-    if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return;
-        }
-    }
-    let contents = members
-        .iter()
-        .map(|member| format!("{}\t{}", member.most, member.least))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let _ = std::fs::write(path, contents);
 }
 
 fn next_u32(state: &mut u64) -> u32 {

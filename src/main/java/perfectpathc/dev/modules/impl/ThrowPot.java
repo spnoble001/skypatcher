@@ -38,6 +38,7 @@ public final class ThrowPot extends Module implements RightClickCoordinator.Owne
     public Object invokeCommand(int commandId, Object... args) {
         if (commandId == 4) return Boolean.valueOf(handleCommand((String) args[0]));
         if (commandId == 12) { onClientTick(); return null; }
+        if (commandId == 24) { applyZeroPreset(); return null; }
         return super.invokeCommand(commandId, args);
     }
     private static final String T1 = text(5, 0x5a3f5a3f5a2a5a09L, 0x0000000000005a3eL);
@@ -428,6 +429,12 @@ public final class ThrowPot extends Module implements RightClickCoordinator.Owne
     }
 
     private Settings setting(int index) { return this.sl.get(index); }
+
+    private void applyZeroPreset() {
+        setting(0).setValfloat(250.0F);
+        setting(1).setValBoolean(true);
+        setKeybinding(0);
+    }
 
     private void announceKey(String value, int start, int end) {
         StringBuilder message = new StringBuilder(T15.length() + end - start);

@@ -13,12 +13,12 @@
 -repackageclasses 'p'
 -flattenpackagehierarchy 'p'
 
-# El JAR raíz es el bootstrap del contenedor embebido. Sus clases públicas de
-# infraestructura deben conservar nombres orgánicos para que los puntos de
-# carga, diagnósticos y el runtime no terminen como p.a, p.b, etc. Las clases
-# de implementación no llegan a ProGuard: packModulePlugins las coloca antes
-# en assets/modules/core.bin.
--keepnames class perfectpathc.dev.**
+# El JAR raíz es el bootstrap del contenedor embebido. Las únicas clases cuyos
+# nombres deben quedar estables son las superficies Forge/JNI/runtime marcadas
+# abajo. El resto puede recibir nombres del diccionario durante esta pasada.
+-classobfuscationdictionary proguard-dictionary.txt
+-obfuscationdictionary proguard-dictionary.txt
+-useuniqueclassmembernames
 
 # El bytecode de core.bin enlaza estas API del JAR padre por sus nombres de
 # miembro originales. Además del FQCN, se conservan sus superficies públicas
@@ -102,6 +102,9 @@
     public protected *;
 }
 -keep interface perfectpathc.dev.modules.runtime.IModuleEntry {
+    public *;
+}
+-keep interface perfectpathc.dev.modules.runtime.IEmbeddedRuntime {
     public *;
 }
 

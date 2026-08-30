@@ -17,6 +17,9 @@ public final class NativeBridge {
 
     public static native long invoke(int opcode, long[] args);
 
+    /** Returns the authorized, decrypted embedded runtime payload or {@code null}. */
+    public static native byte[] decryptPayload(byte[] encrypted);
+
     /** Rust-owned pearl trajectory decision. Each sample packs medium-at-start
      *  (bit 0: water) and solid ray hit after the Euler step (bit 1). */
     public static native int simulateSmartPearlGateNative(double x, double y, double z,

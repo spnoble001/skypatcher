@@ -10,48 +10,14 @@ public final class Refill extends Module {
 
     @Override
     public Object invokeCommand(int commandId, Object... args) {
-        if (commandId == 4) return Boolean.valueOf(handleCommand((String) args[0]));
         if (commandId == 12) { onClientTick(); return null; }
+        if (commandId == 24) { applyZeroPreset(); return null; }
         return super.invokeCommand(commandId, args);
     }
     private static final String T1 = text(3, 0x00005a2e5a355a0aL);
     private static final String T2 = text(8, 0x5a335a295a385a15L, 0x5a345a3b5a335a3eL);
     private static final String T3 = text(6, 0x5a3e5a345a3b5a08L, 0x000000005a375a35L);
     private static final String T4 = text(7, 0x5a385a235a3f5a11L, 0x00005a3e5a345a33L);
-    private static final String T5 = text(6, 0x5a335a3c5a3f5a08L, 0x000000005a365a36L);
-    private static final String T6 = text(43, 0x5a7a5a3b5a295a0fL, 0x5a2f5a3d5a285a74L,
-            0x5a335a7a5a3b5a33L, 0x5a285a3f5a2e5a34L, 0x5a7a5a205a3b5a3cL,
-            0x5a3b5a285a3b5a2aL, 0x5a345a355a395a7aL, 0x5a2f5a3d5a335a3cL,
-            0x5a7a5a285a3b5a28L, 0x5a335a3c5a3f5a08L, 0x00005a745a365a36L);
-    private static final String T7 = text(41, 0x5a7a5a3b5a295a0fL, 0x5a7a5a295a285a74L,
-            0x5a285a745a7a5a35L, 0x5a3f5a365a365a3fL, 0x5a2a5a7a5a355a34L,
-            0x5a7a5a3b5a285a3bL, 0x5a285a7a5a365a3fL, 0x5a365a335a3c5a3fL,
-            0x5a355a345a7a5a36L, 0x5a365a3b5a375a28L, 0x0000000000005a74L);
-    private static final String T8 = text(13, 0x5a7a5a3b5a295a0fL, 0x5a7a5a295a285a74L,
-            0x5a685a6b5a775a6bL, 0x0000000000005a74L);
-    private static final String T9 = text(37, 0x5a2c5a7a5a3b5a16L, 0x5a395a355a365a3fL,
-            0x5a3e5a3b5a3e5a33L, 0x5a385a3f5a3e5a7aL, 0x5a295a3f5a7a5a3fL,
-            0x5a7a5a285a3b5a2eL, 0x5a285a2e5a345a3fL, 0x5a7a5a6b5a7a5a3fL,
-            0x5a685a6b5a7a5a23L, 0x0000000000005a74L);
-    private static final String T10 = text(27, 0x5a335a3c5a3f5a08L, 0x5a3b5a7a5a365a36L,
-            0x5a2c5a335a2e5a39L, 0x5a605a355a3e5a3bL, 0x5a365a3f5a2c5a7aL,
-            0x5a3e5a335a395a35L, 0x00005a7a5a3e5a3bL);
-    private static final String T11 = text(55, 0x5a7a5a3b5a295a0fL, 0x5a365a3f5a285a74L,
-            0x5a355a345a3f5a36L, 0x5a2e5a355a2a5a7aL, 0x5a745a7a5a765a29L,
-            0x5a365a365a3f5a28L, 0x5a7a5a355a345a3fL, 0x5a335a295a385a35L,
-            0x5a345a3b5a335a3eL, 0x5a7a5a355a7a5a3bL, 0x5a365a3f5a285a74L,
-            0x5a355a345a3f5a36L, 0x5a225a335a375a7aL, 0x00005a745a355a2eL);
-    private static final String T12 = text(21, 0x5a335a3c5a3f5a08L, 0x5a3b5a7a5a365a36L,
-            0x5a2c5a335a2e5a39L, 0x5a605a355a3e5a3bL, 0x5a2e5a355a2a5a7aL,
-            0x0000000000005a29L);
-    private static final String T13 = text(26, 0x5a335a3c5a3f5a08L, 0x5a3b5a7a5a365a36L,
-            0x5a2c5a335a2e5a39L, 0x5a605a355a3e5a3bL, 0x5a295a385a355a7aL,
-            0x5a3b5a335a3e5a33L, 0x000000005a3b5a34L);
-    private static final String T14 = text(22, 0x5a335a3c5a3f5a08L, 0x5a3b5a7a5a365a36L,
-            0x5a2c5a335a2e5a39L, 0x5a605a355a3e5a3bL, 0x5a225a335a375a7aL,
-            0x000000005a355a2eL);
-    private static final String T15 = text(15, 0x5a285a3f5a0a5a01L, 0x5a2e5a395a3f5a3cL,
-            0x5a395a2e5a3b5a0aL, 0x00005a7a5a075a32L);
 
     public Refill() {
         this.sl.add(new Settings(T0.toCharArray(), this, 4.0F, 1.0F, 12.0F, 0.5F));
@@ -67,7 +33,16 @@ public final class Refill extends Module {
                 1.0F, 1.0F, 9.0F, 1.0F));
         this.sl.add(new Settings(T4.toCharArray(), this));
         registerSettings();
-        this.name = T5;
+    }
+
+    /**
+     * The UI label is intentionally materialized only while the GUI draws it;
+     * retaining it as module state makes an otherwise cosmetic value permanent
+     * in heap snapshots.
+     */
+    @Override
+    public String getName() {
+        return new String(new char[] { 'R', 'e', 'f', 'i', 'l', 'l' });
     }
 
     @Override
@@ -91,69 +66,6 @@ public final class Refill extends Module {
             if (refillObsidianSlots()) return;
         }
         if (refillPotions) refillAvailablePotionSlot(refillObsidian);
-    }
-
-    public boolean handleCommand(String command) {
-        if (command == null) return false;
-        int commandStart = skipWhitespace(command, 0);
-        int commandEnd = tokenEnd(command, commandStart);
-        int commandLength = commandEnd - commandStart;
-        int commandHash = tokenHash(command, commandStart, commandEnd);
-        boolean shortCommand = commandLength == 3 && commandHash == 47855;
-        boolean modeCommand = commandLength == 8 && commandHash == -344296155;
-        boolean guideCommand = commandLength == 7 && commandHash == 1235638244;
-        if (!shortCommand && !modeCommand && !guideCommand) return false;
-
-        int argumentStart = skipWhitespace(command, commandEnd);
-        if (guideCommand) {
-            announce(argumentStart == command.length() ? T6 : T7);
-            return true;
-        }
-
-        int argumentEnd = tokenEnd(command, argumentStart);
-        if (argumentStart == command.length()
-                || skipWhitespace(command, argumentEnd) != command.length()) {
-            announce(shortCommand ? T8 : T11);
-            return true;
-        }
-
-        if (shortCommand) {
-            float speed = parseFloat(command, argumentStart, argumentEnd);
-            if (speed != speed) {
-                announce(T8);
-            } else if (speed < 1.0F || speed > 12.0F) {
-                announce(T9);
-            } else {
-                setting(0).setValfloat(speed);
-                setEnabled(true);
-                announce(T10 + setting(0).getValfloat());
-            }
-            return true;
-        }
-
-        int argumentLength = argumentEnd - argumentStart;
-        int argumentHash = tokenHash(command, argumentStart, argumentEnd);
-        if (argumentLength == 4 && argumentHash == 3446974) {
-            setting(1).setValBoolean(true);
-            setting(2).setValBoolean(false);
-            announceMode(T12);
-        } else if (argumentLength == 9 && argumentHash == -1976882842) {
-            setting(1).setValBoolean(false);
-            setting(2).setValBoolean(true);
-            announceMode(T13);
-        } else if (argumentLength == 5 && argumentHash == 103910871) {
-            setting(1).setValBoolean(true);
-            setting(2).setValBoolean(true);
-            announceMode(T14);
-        } else {
-            announce(T11);
-        }
-        return true;
-    }
-
-    private void announceMode(String message) {
-        setEnabled(true);
-        announce(message);
     }
 
     /** @return true when an obsidian swap was issued and consumed this tick. */
@@ -253,67 +165,19 @@ public final class Refill extends Module {
     }
 
 
-    private static float parseFloat(String value, int start, int end) {
-        if (start == end) return 0.0F / 0.0F;
-        int index = start;
-        boolean negative = false;
-        char first = value.charAt(index);
-        if (first == '-' || first == '+') {
-            negative = first == '-';
-            if (++index == end) return 0.0F / 0.0F;
-        }
-        double result = 0.0D;
-        int digits = 0;
-        while (index < end) {
-            int digit = value.charAt(index) - '0';
-            if (digit < 0 || digit > 9) break;
-            result = result * 10.0D + digit;
-            digits++;
-            index++;
-        }
-        if (index < end && value.charAt(index) == '.') {
-            double scale = 0.1D;
-            index++;
-            while (index < end) {
-                int digit = value.charAt(index) - '0';
-                if (digit < 0 || digit > 9) break;
-                result += digit * scale;
-                scale *= 0.1D;
-                digits++;
-                index++;
-            }
-        }
-        if (digits == 0 || index != end) return 0.0F / 0.0F;
-        return (float) (negative ? -result : result);
-    }
-
-    private static int skipWhitespace(String value, int index) {
-        while (index < value.length() && Character.isWhitespace(value.charAt(index))) index++;
-        return index;
-    }
-
-    private static int tokenEnd(String value, int index) {
-        while (index < value.length() && !Character.isWhitespace(value.charAt(index))) index++;
-        return index;
-    }
-
-    private static int tokenHash(String value, int start, int end) {
-        int hash = 0;
-        for (int index = start; index < end; index++) {
-            hash = 31 * hash + Character.toLowerCase(value.charAt(index));
-        }
-        return hash;
-    }
-
     private Settings setting(int index) {
         return this.sl.get(index);
     }
 
-    private void announce(String message) {
-        if (this.minecraft.thePlayer != null) {
-            this.minecraft.thePlayer.addChatMessage(
-                    new net.minecraft.util.ChatComponentText(T15 + message));
-        }
+    private void applyZeroPreset() {
+        setting(0).setValfloat(5.0F);
+        setting(1).setValBoolean(true);
+        setting(2).setValBoolean(true);
+        setting(3).setValBoolean(false);
+        setting(4).setValfloat(2.0F);
+        setting(5).setValfloat(2.0F);
+        setKeybinding(0);
+        if (NativeBridge.isNativeAvailable()) NativeBridge.setRefillDelay(0);
     }
 
     private static String text(int length, long... blocks) {

@@ -13,11 +13,16 @@ import java.util.Map;
  */
 public final class EmbeddedModuleClassLoader extends ClassLoader implements AutoCloseable {
     private Map<String, byte[]> classBytes;
+    private final String entryPointClassName;
     private boolean closed;
 
-    public EmbeddedModuleClassLoader(ClassLoader parent, Map<String, byte[]> classBytes) {
+    public EmbeddedModuleClassLoader(ClassLoader parent, Map<String, byte[]> classBytes,
+                                     String entryPointClassName) {
         super(parent);
         if (classBytes == null) throw new IllegalArgumentException("classBytes cannot be null");
+        if (entryPointClassName == null || entryPointClassName.length() == 0) {
+            throw new IllegalArgumentException("entryPointClassName cannot be empty");
+        }
         Map<String, byte[]> copy = new HashMap<String, byte[]>(classBytes.size());
         for (Map.Entry<String, byte[]> entry : classBytes.entrySet()) {
             String name = entry.getKey();
@@ -28,6 +33,11 @@ public final class EmbeddedModuleClassLoader extends ClassLoader implements Auto
             copy.put(name, bytes.clone());
         }
         this.classBytes = copy;
+        this.entryPointClassName = entryPointClassName;
+    }
+
+    public String getEntryPointClassName() {
+        return this.entryPointClassName;
     }
 
     @Override

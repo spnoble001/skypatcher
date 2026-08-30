@@ -514,40 +514,6 @@ public final class NativeBridge {
                 x, y, z, velocityX, velocityY, velocityZ, playerY, minimumGain, mode, samples) != 0;
     }
 
-    /**
-     * Runs the Rust-owned AntiFall decision model. The grid uses two bits per
-     * cell; recovery maps use four bits per cell split across two longs.
-     */
-    public static int nextAntiFallAction(boolean onGround, float fallDistance,
-            float yaw, float moveForward, float moveStrafe,
-            double posX, double posY, double posZ,
-            double motionX, double motionY, double motionZ,
-            double moveX, double moveZ,
-            boolean supported, boolean xSupported, boolean zSupported,
-            float jumpSpeed, boolean gapJump, boolean instantMode,
-            long grid, long recoveryLow, long recoveryHigh) {
-        if (!requireNative()) return 0;
-        long flags = (onGround ? 1L : 0L) | (supported ? 2L : 0L)
-                | (xSupported ? 4L : 0L) | (zSupported ? 8L : 0L)
-                | (gapJump ? 16L : 0L) | (instantMode ? 32L : 0L);
-        long firstFloats = ((long) Float.floatToRawIntBits(fallDistance) & 0xFFFFFFFFL)
-                | ((long) Float.floatToRawIntBits(yaw) << 32);
-        long secondFloats = ((long) Float.floatToRawIntBits(moveForward) & 0xFFFFFFFFL)
-                | ((long) Float.floatToRawIntBits(moveStrafe) << 32);
-        return (int) d(222, flags, firstFloats, secondFloats,
-                Float.floatToRawIntBits(jumpSpeed), Double.doubleToRawLongBits(posX),
-                Double.doubleToRawLongBits(posY), Double.doubleToRawLongBits(posZ),
-                Double.doubleToRawLongBits(motionX), Double.doubleToRawLongBits(motionY),
-                Double.doubleToRawLongBits(motionZ), Double.doubleToRawLongBits(moveX),
-                Double.doubleToRawLongBits(moveZ), grid, recoveryLow, recoveryHigh, 0L);
-    }
-
-    public static double antiFallMotionX() { if (!requireNative()) return 0.0D; return Double.longBitsToDouble(d(112)); }
-    public static double antiFallMotionZ() { if (!requireNative()) return 0.0D; return Double.longBitsToDouble(d(113)); }
-    public static int antiFallStrategy() { if (!requireNative()) return 0; return (int) d(114); }
-    public static void resetAntiFall() { if (nativeAvailable) d(115); }
-
-
     /** Starts the Rust-owned ThrowPot state machine. */
     public static void startThrowPot(float requestedCenter, int initialSlot, int potionSlot,
                                      boolean detourEnabled, boolean archon, boolean debug,
@@ -591,9 +557,58 @@ public final class NativeBridge {
         if (!requireNative()) return false;
         return d(82, mostSignificantBits, leastSignificantBits) != 0L;
     }
+    public static boolean equipoAdd(long mostSignificantBits, long leastSignificantBits,
+                                    String name) {
+        if (!requireNative()) return false;
+        long firstNameWord = packPlayerName(name, 0);
+        long secondNameWord = packPlayerName(name, 8);
+        return d(88, mostSignificantBits, leastSignificantBits,
+                firstNameWord, secondNameWord) != 0L;
+    }
     public static boolean equipoRemove(long mostSignificantBits, long leastSignificantBits) {
         if (!requireNative()) return false;
         return d(83, mostSignificantBits, leastSignificantBits) != 0L;
+    }
+    public static int equipoCount() {
+        if (!requireNative()) return 0;
+        return (int) d(84);
+    }
+    public static long equipoMemberMost(int index) {
+        if (!requireNative()) return 0L;
+        return d(85, index, 0L);
+    }
+    public static long equipoMemberLeast(int index) {
+        if (!requireNative()) return 0L;
+        return d(86, index, 0L);
+    }
+    public static String equipoMemberName(int index) {
+        if (!requireNative()) return "";
+        long first = d(87, index, 0L);
+        long second = d(87, index, 1L);
+        StringBuilder name = new StringBuilder(16);
+        unpackPlayerName(first, name);
+        unpackPlayerName(second, name);
+        return name.toString();
+    }
+
+    private static long packPlayerName(String name, int offset) {
+        if (name == null) return 0L;
+        long packed = 0L;
+        int end = Math.min(name.length(), offset + 8);
+        for (int index = offset; index < end; index++) {
+            char value = name.charAt(index);
+            if (value > 0x7F) break;
+            packed |= (long) value << ((index - offset) * 8);
+        }
+        return packed;
+    }
+
+    private static void unpackPlayerName(long packed, StringBuilder output) {
+        for (int index = 0; index < 8; index++) {
+            char value = (char) ((packed >>> (index * 8)) & 0xFFL);
+            if (value == 0) return;
+            output.append(value);
+        }
     }
 
     /** Soft gate after quiesce: never throw into Forge event buses. */

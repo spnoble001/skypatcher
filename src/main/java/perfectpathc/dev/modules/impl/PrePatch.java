@@ -27,8 +27,10 @@ import perfectpathc.dev.PerfectPatch;
 import perfectpathc.dev.modules.impl.events.XenonEvent;
 import perfectpathc.dev.modules.impl.ui.ClickGuiObj;
 import perfectpathc.dev.modules.impl.utils.GlobalCps;
+import perfectpathc.dev.modules.impl.utils.GlobalSpatialAssistance;
 import perfectpathc.dev.modules.impl.utils.RightClickCoordinator;
 import perfectpathc.dev.modules.impl.utils.AnchorQuarantineRegistry;
+import perfectpathc.dev.modules.impl.simpleassist.SpatialAssistanceEngine;
 
 import java.util.Arrays;
 
@@ -58,6 +60,8 @@ public final class PrePatch extends Module implements RightClickCoordinator.Owne
     private static final int CLICKER_ACTION_RELEASE = 1;
     private static final int CLICKER_ACTION_CLICK = 2;
     private static final int SETTING_RENDER = 5;
+    /** Optional A/B acquisition fallback when the physical cursor resolves an entity. */
+    private static final int SETTING_SPATIAL_ACQUISITION = 6;
     private static final int INPUT_IDLE = 0;
     private static final int INPUT_PATCH_OWNED = 1;
     private static final int INPUT_POST_PATCH_GUARD = 2;
@@ -82,9 +86,10 @@ public final class PrePatch extends Module implements RightClickCoordinator.Owne
             case 11: onClientTick((TickEvent.ClientTickEvent) args[0]); return null;
             case 14: onRenderOverlay((RenderGameOverlayEvent) args[0]); return null;
             case 15: onRenderWorld((RenderWorldLastEvent) args[0]); return null;
-            case 18: return getAnchorDebugState();
             case 19: return flipDirection();
             case 20: applyPatchPresetOne(); return null;
+            case 24: applyZeroPreset(); return null;
+            case 25: return Boolean.valueOf(spatialAcquisitionEnabled());
             default: return super.invokeCommand(commandId, args);
         }
     }
@@ -98,6 +103,7 @@ public final class PrePatch extends Module implements RightClickCoordinator.Owne
         this.sl.add(new Settings("Manual".toCharArray(), this, false));
         this.sl.add(new Settings("Click Blocks".toCharArray(), this, true));
         this.sl.add(new Settings("Render".toCharArray(), this, true));
+        this.sl.add(new Settings("Adquisicion espacial".toCharArray(), this, false));
         registerSettings();
         this.name = "PrePatch";
     }
@@ -208,7 +214,12 @@ public final class PrePatch extends Module implements RightClickCoordinator.Owne
             this.inputState = INPUT_MANUAL_CLICKER;
             return;
         }
-        if (hasManualHandoffIntent(raySignature, tick)) {
+        // The guard absorbs at most the residual frame following an assisted
+        // placement.  A MISS or an unchanged physical face must not turn that
+        // one-tick guard into an indefinite held-RMB lock.
+        if (hasManualHandoffIntent(raySignature, tick)
+                || this.guardSinceTick != Integer.MIN_VALUE
+                && tick - this.guardSinceTick >= POST_PATCH_GUARD_TICKS) {
             this.inputState = INPUT_MANUAL_CLICKER;
         }
     }
@@ -257,7 +268,11 @@ public final class PrePatch extends Module implements RightClickCoordinator.Owne
     }
 
     private boolean prePatchAnchorUnderCrosshair() {
-        MovingObjectPosition hit = this.minecraft.objectMouseOver;
+        return isPrePatchAnchor(acquisitionHit());
+    }
+
+    /** Validates an already chosen physical or spatial acquisition hit. */
+    private boolean isPrePatchAnchor(MovingObjectPosition hit) {
         if (hit == null || hit.typeOfHit != MovingObjectPosition.MovingObjectType.BLOCK
                 || hit.getBlockPos() == null || hit.sideHit == null
                 || this.minecraft.theWorld == null) {
@@ -280,6 +295,44 @@ public final class PrePatch extends Module implements RightClickCoordinator.Owne
                 && isFaceExposed(position.getX(), position.getY(), position.getZ(),
                         hit.sideHit.getFrontOffsetX(), hit.sideHit.getFrontOffsetZ())
                 && isVisibleAnchor(position.toLong(), face);
+    }
+
+    /**
+     * The optional resolver changes only target acquisition. Gesture/handoff
+     * state continues to read the raw physical cursor.
+     */
+    private MovingObjectPosition acquisitionHit() {
+        if (!spatialAcquisitionEnabled()) return this.minecraft.objectMouseOver;
+        return SpatialAssistanceEngine.getActivationHit(this.minecraft,
+                SpatialAssistanceEngine.VIRTUAL_CONE_RADIUS,
+                new SpatialAssistanceEngine.TargetFilter() {
+                    @Override public boolean matches(BlockPos candidate, EnumFacing side) {
+                        return isPrePatchScanTarget(candidate, side);
+                    }
+                });
+    }
+
+    /** The virtual resolver may see only the active scan's exposed axis faces. */
+    private boolean isPrePatchScanTarget(BlockPos position, EnumFacing side) {
+        if (position == null || side == null || this.minecraft.theWorld == null
+                || this.minecraft.thePlayer == null) return false;
+        boolean eastWest = setting(1).getModeIndex() == 0;
+        if (eastWest ? side != EnumFacing.EAST && side != EnumFacing.WEST
+                : side != EnumFacing.NORTH && side != EnumFacing.SOUTH) return false;
+        int face = side.getIndex();
+        if (AnchorQuarantineRegistry.shared().isQuarantined(this.minecraft.theWorld,
+                position.toLong(), face, this.minecraft.thePlayer.ticksExisted)) return false;
+        this.scanCursor.set(position.getX(), position.getY(), position.getZ());
+        return this.minecraft.theWorld.isBlockLoaded(this.scanCursor)
+                && this.minecraft.theWorld.getBlockState(this.scanCursor).getBlock() == Blocks.obsidian
+                && isFaceExposed(position.getX(), position.getY(), position.getZ(),
+                        side.getFrontOffsetX(), side.getFrontOffsetZ())
+                && isVisibleAnchor(position.toLong(), face);
+    }
+
+    private boolean spatialAcquisitionEnabled() {
+        return setting(SETTING_SPATIAL_ACQUISITION).getValBoolean()
+                && GlobalSpatialAssistance.isEnabled();
     }
 
     private void click() {
@@ -504,9 +557,7 @@ public final class PrePatch extends Module implements RightClickCoordinator.Owne
                 }
             }
         }
-        if (index != offsets.length) {
-            throw new IllegalStateException("Invalid PrePatch volume offset count");
-        }
+        if (index != offsets.length) throw new IllegalStateException();
         Arrays.sort(offsets);
         return offsets;
     }
@@ -550,10 +601,21 @@ public final class PrePatch extends Module implements RightClickCoordinator.Owne
         return !setting(3).getValBoolean() || Mouse.isButtonDown(1);
     }
 
+    @Override
+    public void onSettingsChanged() {
+        // Direction changes made through the GUI must not retain a handoff
+        // captured under the previous axis. Other deliberate setting changes
+        // are equally safe points at which to release synthetic RMB state.
+        deactivateClicker();
+        resetInputHandoff();
+    }
+
     private String flipDirection() {
         setting(1).setValString(setting(1).getModeIndex() == 0
                 ? "North/South" : "East/West");
         clearAnchors();
+        deactivateClicker();
+        resetInputHandoff();
         return setting(1).getValString();
     }
 
@@ -562,6 +624,18 @@ public final class PrePatch extends Module implements RightClickCoordinator.Owne
         setting(3).setValBoolean(true);
         clearAnchors();
         deactivateClicker();
+        resetInputHandoff();
+    }
+
+    private void applyZeroPreset() {
+        setting(1).setValString("East/West");
+        setting(2).setRange(3.0F, 3.0F);
+        setting(3).setValBoolean(true);
+        setting(4).setValBoolean(true);
+        setting(SETTING_RENDER).setValBoolean(false);
+        setKeybinding(org.lwjgl.input.Keyboard.KEY_INSERT);
+        clearAnchors();
+        onSettingsChanged();
     }
 
     private void finishTick(int centerX, int centerY, int centerZ) {
@@ -576,8 +650,8 @@ public final class PrePatch extends Module implements RightClickCoordinator.Owne
                     position, face, 0, 0);
             return;
         }
-        MovingObjectPosition hit = this.minecraft.objectMouseOver;
-        if (prePatchAnchorUnderCrosshair() && hit != null) {
+        MovingObjectPosition hit = acquisitionHit();
+        if (isPrePatchAnchor(hit)) {
             position = hit.getBlockPos().toLong();
             face = hit.sideHit.ordinal();
         }
@@ -654,48 +728,6 @@ public final class PrePatch extends Module implements RightClickCoordinator.Owne
             GlStateManager.popMatrix();
             GL11.glPopAttrib();
         }
-    }
-
-    public String getDebugState() {
-        return "PrePatch enabled=" + this.enabled
-                + " direction=" + setting(1).getValString()
-                + " volume=12x12x12"
-                + " selected=" + (int)NativeBridge.prePatchRenderCounts()
-                + " render=" + setting(SETTING_RENDER).getValBoolean()
-                + " manual=" + setting(3).getValBoolean()
-                + " manualPressed=" + Mouse.isButtonDown(1)
-                + " spreadRange=" + Math.round(setting(2).getRangeMinimum())
-                + "-" + Math.round(setting(2).getRangeMaximum())
-                + " syntheticSpread=" + NativeBridge.prePatchSyntheticSpread();
-    }
-
-    /** Temporary field debugger for PrePatch's independently owned state. */
-    private String getAnchorDebugState() {
-        MovingObjectPosition hit = this.minecraft.objectMouseOver;
-        boolean blockHit = hit != null
-                && hit.typeOfHit == MovingObjectPosition.MovingObjectType.BLOCK
-                && hit.getBlockPos() != null && hit.sideHit != null;
-        boolean anchor = blockHit && prePatchAnchorUnderCrosshair();
-        long counts = NativeBridge.prePatchRenderCounts();
-        int faces = (int)counts;
-        int blocks = (int)(counts >>> 32);
-        long timing = NativeBridge.prePatchDiagnosticTiming(System.currentTimeMillis());
-        long scanAge = timing & 0xFFFFFFFFL;
-        int actionIdleTicks = (int)(timing >>> 32 & 0xFFFFL);
-        int placements = (int)(timing >>> 48 & 0xFFFFL);
-        long scan = NativeBridge.prePatchDiagnosticCounts();
-        int cursor = (int)(scan & 0xFFFFL);
-        int maximum = (int)(scan >>> 16 & 0xFFFFL);
-        int accumulating = (int)(scan >>> 32 & 0xFFFFL);
-        return "hit=" + (blockHit ? hit.getBlockPos() + "/" + hit.sideHit : "none")
-                + " anchor=" + anchor
-                + " syntheticSpread=" + NativeBridge.prePatchSyntheticSpread()
-                + " visible=" + blocks + "/" + faces
-                + " accumulating=" + accumulating
-                + " scan=" + cursor + "/" + maximum
-                + " scanAgeMs=" + scanAge
-                + " actionIdleTicks=" + actionIdleTicks
-                + " placements=" + placements;
     }
 
     private boolean isVisibleForRender(long packed, ClippingHelper clippingHelper,

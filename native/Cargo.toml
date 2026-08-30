@@ -16,6 +16,7 @@ strip = "symbols"
 jni = "0.21"
 ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 sha2 = "0.10"
+aes-gcm = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

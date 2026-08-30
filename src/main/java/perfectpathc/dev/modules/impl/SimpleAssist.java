@@ -36,7 +36,8 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
     private static final int SETTING_EXECUTION_MODE = 2;
     private static final int SETTING_NATURAL = 3;
     private static final int SETTING_SPATIAL_ASSISTANCE = 4;
-    private static final int SETTING_RENDER_HELP = 5;
+    private static final int SETTING_CREATIVE_REACH = 5;
+    private static final int SETTING_RENDER_HELP = 6;
     private static final Field RIGHT_CLICK_DELAY_TIMER = ReflectionHelper.findField(
             Minecraft.class, "rightClickDelayTimer", "field_71467_ac");
     private static final Field PRESS_TIME = ReflectionHelper.findField(
@@ -57,6 +58,7 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
                 setting(SETTING_SPEED).setValfloat(15.0F);
                 GlobalCps.set(setting(SETTING_SPEED).getValfloat());
                 return null;
+            case 24: applyZeroPreset(); return null;
             default: return super.invokeCommand(commandId, args);
         }
     }
@@ -73,6 +75,7 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
         // Rendered by ClickGuiObj as an independent ON/OFF switch for this
         // input-pipeline submodule.
         this.sl.add(new Settings("Asistencia espacial".toCharArray(), this, true));
+        this.sl.add(new Settings("Creativo".toCharArray(), this, false));
         this.sl.add(new Settings("Renderizar ayuda".toCharArray(), this, GlobalRenderHelp.isEnabled()));
         this.sl.add(new Settings("Keybind".toCharArray(), this));
         registerSettings();
@@ -185,7 +188,7 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
     }
 
     private boolean hasPrePatchIntentUnderCrosshair() {
-        MovingObjectPosition hit = this.minecraft.objectMouseOver;
+        MovingObjectPosition hit = prePatchIntentHit();
         return hit != null
                 && hit.typeOfHit == MovingObjectPosition.MovingObjectType.BLOCK
                 && hit.getBlockPos() != null && hit.sideHit != null
@@ -194,6 +197,27 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
                         this.minecraft.thePlayer.ticksExisted)
                 && NativeBridge.matchesPrePatchIntent(
                         pack(hit.getBlockPos()), hit.sideHit.ordinal());
+    }
+
+    /** Reads a live PrePatch intent through the same optional acquisition policy. */
+    private MovingObjectPosition prePatchIntentHit() {
+        if (!prePatchSpatialAcquisitionEnabled()) return this.minecraft.objectMouseOver;
+        return SpatialAssistanceEngine.getActivationHit(this.minecraft,
+                SpatialAssistanceEngine.VIRTUAL_CONE_RADIUS,
+                new SpatialAssistanceEngine.TargetFilter() {
+                    @Override public boolean matches(BlockPos anchorNode,
+                                                      net.minecraft.util.EnumFacing side) {
+                        return side != null && !AnchorQuarantineRegistry.shared().isQuarantined(
+                                SimpleAssist.this.minecraft.theWorld, pack(anchorNode), side.getIndex(),
+                                SimpleAssist.this.minecraft.thePlayer.ticksExisted)
+                                && NativeBridge.matchesPrePatchIntent(pack(anchorNode), side.getIndex());
+                    }
+                });
+    }
+
+    private boolean prePatchSpatialAcquisitionEnabled() {
+        return PerfectPatch.instance != null && PerfectPatch.instance.getModule(2) != null
+                && Boolean.TRUE.equals(PerfectPatch.instance.invokeModuleCommand(2, 25));
     }
 
     /** The input adapter is controlled solely by the spatial submodule switch. */
@@ -321,7 +345,13 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
         if (isThreeDimensionalMode() && hasPriority3DRoute()) {
             return false;
         }
-        MovingObjectPosition hit = interactionHit();
+        MovingObjectPosition prePatchHit = prePatchIntentHit();
+        MovingObjectPosition hit = prePatchHit != null
+                && prePatchHit.typeOfHit == MovingObjectPosition.MovingObjectType.BLOCK
+                && prePatchHit.getBlockPos() != null && prePatchHit.sideHit != null
+                && NativeBridge.matchesPrePatchIntent(pack(prePatchHit.getBlockPos()),
+                        prePatchHit.sideHit.getIndex())
+                ? prePatchHit : interactionHit();
         long packedHit = hit != null
                 && hit.typeOfHit == MovingObjectPosition.MovingObjectType.BLOCK
                 && hit.getBlockPos() != null ? pack(hit.getBlockPos()) : Long.MIN_VALUE;
@@ -622,6 +652,18 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
         return this.sl.get(index);
     }
 
+    private void applyZeroPreset() {
+        setting(SETTING_SPEED).setValfloat(14.0F);
+        setting(SETTING_REDUCED_KB).setValBoolean(true);
+        setting(SETTING_EXECUTION_MODE).setValString("1D");
+        setting(SETTING_NATURAL).setValBoolean(false);
+        setting(SETTING_SPATIAL_ASSISTANCE).setValBoolean(true);
+        setting(SETTING_CREATIVE_REACH).setValBoolean(false);
+        setting(SETTING_RENDER_HELP).setValBoolean(false);
+        setKeybinding(org.lwjgl.input.Keyboard.KEY_INSERT);
+        onSettingsChanged();
+    }
+
     @Override
     public void onSettingsChanged() {
         boolean spatialChanged = GlobalSpatialAssistance.isEnabled()
@@ -630,6 +672,11 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
         GlobalReducedKb.setEnabled(setting(SETTING_REDUCED_KB).getValBoolean());
         GlobalNaturalMode.setEnabled(setting(SETTING_NATURAL).getValBoolean());
         GlobalSpatialAssistance.setEnabled(setting(SETTING_SPATIAL_ASSISTANCE).getValBoolean());
+        if (!GlobalSpatialAssistance.isEnabled()) {
+            setting(SETTING_CREATIVE_REACH).setValBoolean(false);
+        }
+        GlobalSpatialAssistance.setCreativeReachEnabled(
+                setting(SETTING_CREATIVE_REACH).getValBoolean());
         GlobalRenderHelp.setEnabled(setting(SETTING_RENDER_HELP).getValBoolean());
         applyExecutionMode();
         syncStateFrictionRegistration();
@@ -645,6 +692,12 @@ public class SimpleAssist extends Module implements RightClickCoordinator.Owner,
 
     private boolean isThreeDimensionalMode() {
         return setting(SETTING_EXECUTION_MODE).getModeIndex() == 1;
+    }
+
+    @Override
+    public boolean isSettingInteractive(Settings candidate) {
+        return candidate != setting(SETTING_CREATIVE_REACH)
+                || setting(SETTING_SPATIAL_ASSISTANCE).getValBoolean();
     }
 
 

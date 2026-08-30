@@ -82,6 +82,11 @@ public abstract class Module implements IModuleEntry {
     public void onSettingsChanged() {
     }
 
+    /** Lets a module disable a dependent setting without hiding its current state. */
+    public boolean isSettingInteractive(Settings setting) {
+        return true;
+    }
+
     @Override
     public void initialize() {
         // Module constructors establish their configuration. The host owns activation.

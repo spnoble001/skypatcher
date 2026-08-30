@@ -8,11 +8,14 @@ import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.common.event.FMLInitializationEvent;
 import perfectpathc.dev.nativecore.NativeBridge;
 import perfectpathc.dev.modules.runtime.EmbeddedModuleClassLoader;
+import perfectpathc.dev.modules.runtime.IEmbeddedRuntime;
 import perfectpathc.dev.modules.runtime.IModuleEntry;
 import perfectpathc.dev.modules.runtime.ModuleLauncher;
 import perfectpathc.dev.modules.runtime.ModuleRegistry;
 import java.io.IOException;
-import java.lang.reflect.Method;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.util.Arrays;
 
 @Mod(
         modid = PerfectPatch.MOD_ID,
@@ -31,6 +34,7 @@ public final class PerfectPatch {
 
     private final IModuleEntry[] modules = new IModuleEntry[11];
     private EmbeddedModuleClassLoader embeddedModuleLoader;
+    private IEmbeddedRuntime embeddedRuntime;
     private InputRouter inputRouter;
 
     @Mod.EventHandler
@@ -66,6 +70,7 @@ public final class PerfectPatch {
             ModuleRegistry.unload(this.embeddedModuleLoader);
             this.embeddedModuleLoader = null;
         }
+        this.embeddedRuntime = null;
         try {
             return NativeBridge.invoke(1, new long[0]) != 0L;
         } catch (Throwable ignored) {
@@ -79,14 +84,38 @@ public final class PerfectPatch {
     }
 
     private void loadEmbeddedModules() {
+        byte[] encrypted = null;
+        byte[] payload = null;
         try {
-            this.embeddedModuleLoader = ModuleRegistry.load(PerfectPatch.class,
-                    "/assets/modules/core.bin");
-            for (int index = 0; index < this.modules.length; index++) this.modules[index] = launchModule(className(index));
+            encrypted = readPayloadResource();
+            payload = NativeBridge.decryptPayload(encrypted);
+            if (payload == null || payload.length == 0) return;
+            this.embeddedModuleLoader = ModuleRegistry.loadFromBuffer(PerfectPatch.class, payload);
+            this.embeddedRuntime = ModuleLauncher.launchRuntime(this.embeddedModuleLoader);
+            for (int index = 0; index < this.modules.length; index++) {
+                this.modules[index] = this.embeddedRuntime.createModule(index);
+            }
         } catch (IOException exception) {
             // The test module is optional during development, before core.bin exists.
         } catch (ReflectiveOperationException exception) {
             throw new IllegalStateException("Could not initialize embedded module", exception);
+        } finally {
+            if (encrypted != null) Arrays.fill(encrypted, (byte) 0);
+            if (payload != null) Arrays.fill(payload, (byte) 0);
+        }
+    }
+
+    /** Reads an inert encrypted blob; its format is understood only by JNI. */
+    private static byte[] readPayloadResource() throws IOException {
+        InputStream input = PerfectPatch.class.getResourceAsStream("/assets/sky/cache.dat");
+        if (input == null) throw new IOException("Embedded runtime data is missing");
+        try {
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            byte[] chunk = new byte[8192];
+            for (int read; (read = input.read(chunk)) >= 0;) output.write(chunk, 0, read);
+            return output.toByteArray();
+        } finally {
+            input.close();
         }
     }
 
@@ -110,20 +139,9 @@ public final class PerfectPatch {
     }
 
     public void openClickGui(boolean combat) {
-        try {
-            Class<?> guiClass = Class.forName(guiClassName(),
-                    true, this.embeddedModuleLoader);
-            Method factory = guiClass.getMethod(new String(combat
-                    ? new char[] {99,111,109,98,97,116,71,117,105}
-                    : new char[] {112,97,116,99,104,71,117,105}));
-            Minecraft.getMinecraft().displayGuiScreen((GuiScreen) factory.invoke(null));
-        } catch (ReflectiveOperationException exception) {
-            throw new IllegalStateException("Could not open embedded click GUI", exception);
-        }
-    }
-
-    private IModuleEntry launchModule(String className) throws ReflectiveOperationException {
-        return ModuleLauncher.launch(this.embeddedModuleLoader, className);
+        if (this.embeddedRuntime == null) return;
+        GuiScreen screen = this.embeddedRuntime.createGui(combat);
+        Minecraft.getMinecraft().displayGuiScreen(screen);
     }
 
     private static void setModuleEnabled(IModuleEntry module, boolean enabled) {
@@ -148,23 +166,6 @@ public final class PerfectPatch {
 
     private static boolean booleanValue(Object value) {
         return value instanceof Boolean && ((Boolean) value).booleanValue();
-    }
-
-    private static String className(int index) {
-        char[][] suffixes = {
-                {80,97,116,99,104,67,114,117,109,98,115}, {83,105,109,112,108,101,65,115,115,105,115,116},
-                {80,114,101,80,97,116,99,104}, {65,110,116,105,70,97,108,108,77,111,100,117,108,101},
-                {82,101,102,105,108,108}, {84,104,114,111,119,80,111,116}, {69,113,117,105,112,111},
-                {65,105,109,65,115,115,105,115,116}, {76,101,102,116,67,108,105,99,107,101,114},
-                {83,109,97,114,116,80,101,97,114,108,71,97,116,101,107,101,101,112,101,114},
-                {83,105,109,112,108,101,65,115,115,105,115,116,51,68}
-        };
-        return new String(new char[] {112,101,114,102,101,99,116,112,97,116,104,99,46,100,101,118,46,109,111,100,117,108,101,115,46,105,109,112,108,46})
-                + new String(suffixes[index]);
-    }
-
-    private static String guiClassName() {
-        return new String(new char[] {112,101,114,102,101,99,116,112,97,116,104,99,46,100,101,118,46,109,111,100,117,108,101,115,46,105,109,112,108,46,117,105,46,67,108,105,99,107,71,117,105,79,98,106});
     }
 
 }

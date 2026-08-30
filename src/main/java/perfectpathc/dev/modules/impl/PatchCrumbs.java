@@ -54,6 +54,7 @@ public final class PatchCrumbs extends Module {
                     GlobalModuleNotifications.announce((Module)args[0]);
                 }
                 return null;
+            case 24: applyZeroPreset(); return null;
             default: return super.invokeCommand(commandId, args);
         }
     }
@@ -346,6 +347,7 @@ public final class PatchCrumbs extends Module {
                 // V2 replaces PatchCrumbs' original cardinal guide lines.
                 // It intentionally has no dependency on Render Patches,
                 // whose native records are a separate debug subsystem.
+                renderExplosionBoxV2(crumb, viewX, viewY, viewZ, width);
                 renderOriginalLinesV2(crumb, crumbFlags, viewX, viewY, viewZ, width);
                 return;
             }
@@ -450,6 +452,42 @@ public final class PatchCrumbs extends Module {
         }
     }
 
+    /**
+     * Marks the stabilized cell of the last effective TNT explosion. Unlike
+     * the two flat cardinal guides, all twelve edges are visible so the user
+     * can read the crumb's X/Y/Z depth at a glance.
+     */
+    private static void renderExplosionBoxV2(long crumb,
+                                             double viewX, double viewY, double viewZ,
+                                             float lineWidth) {
+        double x1 = unpackX(crumb) - viewX;
+        double y1 = unpackY(crumb) - viewY;
+        double z1 = unpackZ(crumb) - viewZ;
+        double x2 = x1 + 1.0D;
+        double y2 = y1 + 1.0D;
+        double z2 = z1 + 1.0D;
+        long pulse = System.currentTimeMillis() / 120L;
+
+        GL11.glDisable(GL11.GL_DEPTH_TEST);
+        GL11.glDepthMask(false);
+        GL11.glLineWidth(Math.max(2.0F, lineWidth));
+
+        drawSegmentedLine(x1, y1, z1, x2, y1, z1, 1.0F, 0.48F, 0.12F, pulse, 4);
+        drawSegmentedLine(x2, y1, z1, x2, y1, z2, 1.0F, 0.48F, 0.12F, pulse + 1L, 4);
+        drawSegmentedLine(x2, y1, z2, x1, y1, z2, 1.0F, 0.48F, 0.12F, pulse + 2L, 4);
+        drawSegmentedLine(x1, y1, z2, x1, y1, z1, 1.0F, 0.48F, 0.12F, pulse + 3L, 4);
+
+        drawSegmentedLine(x1, y2, z1, x2, y2, z1, 1.0F, 0.67F, 0.18F, pulse + 4L, 4);
+        drawSegmentedLine(x2, y2, z1, x2, y2, z2, 1.0F, 0.67F, 0.18F, pulse + 5L, 4);
+        drawSegmentedLine(x2, y2, z2, x1, y2, z2, 1.0F, 0.67F, 0.18F, pulse + 6L, 4);
+        drawSegmentedLine(x1, y2, z2, x1, y2, z1, 1.0F, 0.67F, 0.18F, pulse + 7L, 4);
+
+        drawSegmentedLine(x1, y1, z1, x1, y2, z1, 1.0F, 0.82F, 0.24F, pulse + 8L, 4);
+        drawSegmentedLine(x2, y1, z1, x2, y2, z1, 1.0F, 0.82F, 0.24F, pulse + 9L, 4);
+        drawSegmentedLine(x2, y1, z2, x2, y2, z2, 1.0F, 0.82F, 0.24F, pulse + 10L, 4);
+        drawSegmentedLine(x1, y1, z2, x1, y2, z2, 1.0F, 0.82F, 0.24F, pulse + 11L, 4);
+    }
+
     private void updatePatchGuide(long crumb) {
         int currentTick = this.minecraft.thePlayer.ticksExisted;
         int crumbX = unpackX(crumb);
@@ -524,7 +562,14 @@ public final class PatchCrumbs extends Module {
     private static void drawSegmentedAxis(double startX, double startY, double startZ,
                                           double endX, double endY, double endZ,
                                           float red, float green, float blue, long pulse) {
-        final int segments = 100;
+        drawSegmentedLine(startX, startY, startZ, endX, endY, endZ,
+                red, green, blue, pulse, 100);
+    }
+
+    private static void drawSegmentedLine(double startX, double startY, double startZ,
+                                          double endX, double endY, double endZ,
+                                          float red, float green, float blue, long pulse,
+                                          int segments) {
         GL11.glBegin(GL11.GL_LINES);
         for (int segment = 0; segment < segments; segment++) {
             double from = (double)segment / (double)segments;
@@ -616,6 +661,21 @@ public final class PatchCrumbs extends Module {
 
     private void resetDetectionState() {
         NativeBridge.resetPatchCrumbState();
+    }
+
+    private void applyZeroPreset() {
+        setting(0).setValBoolean(false);
+        setting(1).setValBoolean(false);
+        setting(2).setValBoolean(true);
+        setting(3).setValBoolean(false);
+        setting(4).setValString("Auto");
+        setting(5).setValfloat(5.0F);
+        setting(SETTING_RENDER_PATCHES).setValBoolean(false);
+        setting(SETTING_RENDER_V2).setValBoolean(true);
+        setting(SETTING_MODULE_NOTIFICATIONS).setValBoolean(true);
+        setKeybinding(0);
+        onSettingsChanged();
+        resetDetectionState();
     }
 
     private Settings setting(int index) {

@@ -1,6 +1,10 @@
 import java.io.DataOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.security.SecureRandom
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 import java.util.zip.GZIPOutputStream
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -52,12 +56,36 @@ processResources {
 }
 
 def cargoBinary = file(System.getProperty("user.home") + "/.cargo/bin/cargo")
+def payloadKeyFile = file("${buildDir}/generated/payload.key")
+
+task preparePayloadKey {
+    group = "build"
+    description = "Creates the per-artifact native payload key."
+    outputs.file payloadKeyFile
+    doLast {
+        def configured = System.getenv("PERFECTPATCH_PAYLOAD_KEY")
+        if (configured != null && configured ==~ /(?i)[0-9a-f]{64}/) {
+            payloadKeyFile.parentFile.mkdirs()
+            payloadKeyFile.text = configured.toLowerCase(Locale.ROOT) + "\n"
+            return
+        }
+        if (payloadKeyFile.exists() && payloadKeyFile.text.trim() ==~ /(?i)[0-9a-f]{64}/) return
+        byte[] key = new byte[32]
+        new SecureRandom().nextBytes(key)
+        StringBuilder encoded = new StringBuilder(64)
+        key.each { value -> encoded.append(String.format("%02x", value & 0xFF)) }
+        payloadKeyFile.parentFile.mkdirs()
+        payloadKeyFile.text = encoded.toString() + "\n"
+    }
+}
 
 task buildNativeLinux(type: Exec) {
     group = "build"
     description = "Builds the Linux Rust JNI core."
     workingDir "native"
     commandLine(cargoBinary.exists() ? cargoBinary.absolutePath : "cargo", "build", "--release")
+    dependsOn preparePayloadKey
+    doFirst { environment "PERFECTPATCH_PAYLOAD_KEY", payloadKeyFile.text.trim() }
 }
 
 task buildNativeWindows(type: Exec) {
@@ -66,6 +94,8 @@ task buildNativeWindows(type: Exec) {
     workingDir "native"
     environment "RUSTFLAGS", "-C linker=rust-lld -C target-feature=+crt-static -L native=" + System.getProperty("user.home") + "/.xwin/crt/lib/x86_64 -L native=" + System.getProperty("user.home") + "/.xwin/sdk/lib/um/x86_64 -L native=" + System.getProperty("user.home") + "/.xwin/sdk/lib/ucrt/x86_64"
     commandLine(cargoBinary.exists() ? cargoBinary.absolutePath : "cargo", "build", "--target", "x86_64-pc-windows-msvc", "--release")
+    dependsOn preparePayloadKey
+    doFirst { environment "PERFECTPATCH_PAYLOAD_KEY", payloadKeyFile.text.trim() }
 }
 
 task buildNative {
@@ -86,14 +116,70 @@ jar {
 }
 
 // =========================================================================
-// Tarea de Empaquetado PPM1 + GZIP (Post-Reobfuscation)
+// Ofuscación aislada del payload + empaquetado PPM1 + GZIP (Post-Reobfuscation)
 // =========================================================================
-task packModulePlugins {
+task obfuscateModulePayload(type: JavaExec) {
     group = "build"
-    description = "Empaqueta las clases reofuscadas de los submódulos en assets/modules/core.bin dentro del JAR."
+    description = "Obfuscates embedded module classes before payload encryption."
     dependsOn reobfJar
 
     def inputJar = file("${buildDir}/libs/${archivesBaseName}-${version}.jar")
+    def outputJar = file("${buildDir}/payload/modules-obfuscated.jar")
+    def mappingFile = file("${buildDir}/payload/mapping.txt")
+    def configFile = file("proguard-payload-rules.pro")
+
+    inputs.file inputJar
+    inputs.file configFile
+    inputs.file file("proguard-dictionary.txt")
+    outputs.file outputJar
+    outputs.file mappingFile
+
+    classpath = configurations.proguard
+    main = "proguard.ProGuard"
+
+    doFirst {
+        outputJar.parentFile.mkdirs()
+        if (outputJar.exists()) outputJar.delete()
+
+        def payloadRtCandidates = [
+                file("${System.getenv('JAVA_HOME')}/jre/lib/rt.jar"),
+                file("${System.getenv('JAVA_HOME')}/lib/rt.jar"),
+                file("${System.getProperty('user.home')}/.sdkman/candidates/java/8.0.442-tem/jre/lib/rt.jar"),
+                file("${System.getProperty('user.home')}/.sdkman/candidates/java/8.0.442-tem/lib/rt.jar")
+        ]
+        def payloadRtJar = payloadRtCandidates.find { it.exists() }
+        if (payloadRtJar == null) throw new GradleException("Java 8 rt.jar is required for payload obfuscation")
+
+        def pgArgs = []
+        // Only implementation classes are program classes.  Everything else
+        // remains a library so symbolic links to the parent bootstrap stay ABI-stable.
+        pgArgs << "-injars" << "${inputJar.absolutePath}(perfectpathc/dev/modules/impl/**.class)"
+        pgArgs << "-outjars" << outputJar.absolutePath
+        pgArgs << "-libraryjars" << payloadRtJar.absolutePath
+        pgArgs << "-libraryjars" << "${inputJar.absolutePath}(!perfectpathc/dev/modules/impl/**)"
+
+        def forgeRuntime = file("${gradle.gradleUserHomeDir}/caches/minecraft/net/minecraftforge/forge/1.8.9-11.15.1.2318-1.8.9/stable/22/forge-1.8.9-11.15.1.2318-1.8.9-binpatched.jar")
+        if (forgeRuntime.exists()) pgArgs << "-libraryjars" << forgeRuntime.absolutePath
+        configurations.compile.files.each { jarFile ->
+            if (jarFile.exists() && jarFile.name.endsWith(".jar") && jarFile.canonicalFile != inputJar.canonicalFile) {
+                pgArgs << "-libraryjars" << jarFile.absolutePath
+            }
+        }
+
+        pgArgs << "-include" << configFile.absolutePath
+        pgArgs << "-printmapping" << mappingFile.absolutePath
+        args = pgArgs
+    }
+}
+
+task packModulePlugins {
+    group = "build"
+    description = "Packs obfuscated module classes into the encrypted runtime payload."
+    dependsOn obfuscateModulePayload, preparePayloadKey
+
+    def inputJar = file("${buildDir}/libs/${archivesBaseName}-${version}.jar")
+    def obfuscatedPayloadJar = file("${buildDir}/payload/modules-obfuscated.jar")
+    def payloadMapping = file("${buildDir}/payload/mapping.txt")
 
     inputs.file inputJar
     outputs.file inputJar
@@ -102,27 +188,34 @@ task packModulePlugins {
         if (!inputJar.exists()) return
 
         def tempJar = file("${buildDir}/libs/${archivesBaseName}-${version}-temp.jar")
-        def targetPackagePath = "perfectpathc/dev/modules/impl/" // Ajusta según tu paquete
-
         def entriesToPack = []
 
-        // 1. Leer el JAR ya reofuscado e identificar las clases a empaquetar
-        ZipFile zipIn = new ZipFile(inputJar)
-        zipIn.entries().each { entry ->
-            if (!entry.isDirectory() && entry.name.startsWith(targetPackagePath) && entry.name.endsWith(".class")) {
+        // 1. The program JAR contains only payload classes and has already
+        // passed through the payload-specific dictionary obfuscation.
+        ZipFile payloadIn = new ZipFile(obfuscatedPayloadJar)
+        payloadIn.entries().each { entry ->
+            if (!entry.isDirectory() && entry.name.endsWith(".class")) {
                 def binaryName = entry.name.substring(0, entry.name.length() - 6).replace('/', '.')
-                def bytes = zipIn.getInputStream(entry).bytes
+                def bytes = payloadIn.getInputStream(entry).bytes
                 entriesToPack.add([name: binaryName, data: bytes])
             }
         }
+        payloadIn.close()
 
         if (entriesToPack.isEmpty()) {
-            println "⚠️ No se encontraron clases en '${targetPackagePath}' dentro del JAR. Omitiendo core.bin."
-            zipIn.close()
+            println "⚠️ No se encontraron clases ofuscadas para el payload."
             return
         }
 
-        println "📦 Empaquetando ${entriesToPack.size()} clases en formato PPM1..."
+        def entrySource = "perfectpathc.dev.modules.impl.PayloadRuntime"
+        def entryPattern = ~/^${java.util.regex.Pattern.quote(entrySource)}\s+->\s+([^:]+):$/
+        def entryLine = payloadMapping.readLines().find { line -> line ==~ entryPattern }
+        if (entryLine == null) throw new GradleException("Payload entry point is missing from ProGuard mapping")
+        def matcher = (entryLine =~ entryPattern)
+        matcher.find()
+        def payloadEntry = matcher.group(1)
+
+        println "📦 Empaquetando ${entriesToPack.size()} clases ofuscadas en formato PPM1..."
 
         // 2. Construir el contenedor PPM1 en memoria
         ByteArrayOutputStream baos = new ByteArrayOutputStream()
@@ -130,7 +223,8 @@ task packModulePlugins {
         DataOutputStream dos = new DataOutputStream(gzip)
 
         dos.writeBytes("PPM1")  // Magic Header
-        dos.writeInt(1)         // Versión
+        dos.writeInt(2)         // Versión
+        dos.writeUTF(payloadEntry)
         dos.writeInt(entriesToPack.size())
 
         entriesToPack.each { item ->
@@ -143,12 +237,30 @@ task packModulePlugins {
         dos.close()
         byte[] coreBinBytes = baos.toByteArray()
 
-        // 3. Reconstruir el JAR: Excluyendo las clases empaquetadas e insertando assets/modules/core.bin
+        String keyHex = payloadKeyFile.text.trim()
+        byte[] key = new byte[32]
+        for (int index = 0; index < key.length; index++) {
+            key[index] = (byte) Integer.parseInt(keyHex.substring(index * 2, index * 2 + 2), 16)
+        }
+        byte[] nonce = new byte[12]
+        new SecureRandom().nextBytes(nonce)
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"),
+                new GCMParameterSpec(128, nonce))
+        byte[] encryptedPayload = cipher.doFinal(coreBinBytes)
+        ByteArrayOutputStream protectedPayload = new ByteArrayOutputStream()
+        protectedPayload.write("SKY1".getBytes("US-ASCII"))
+        protectedPayload.write(nonce)
+        protectedPayload.write(encryptedPayload)
+        byte[] payloadBytes = protectedPayload.toByteArray()
+
+        // 3. Rebuild the parent JAR without the plaintext implementation classes.
+        ZipFile zipIn = new ZipFile(inputJar)
         ZipOutputStream zipOut = new ZipOutputStream(new FileOutputStream(tempJar))
 
         zipIn.entries().each { entry ->
             // Excluir las clases del subpaquete para que no estén sueltas en el JAR
-            if (!entry.name.startsWith(targetPackagePath)) {
+            if (!entry.name.startsWith("perfectpathc/dev/modules/impl/")) {
                 zipOut.putNextEntry(new ZipEntry(entry.name))
                 zipIn.getInputStream(entry).withCloseable { is ->
                     zipOut << is
@@ -158,9 +270,9 @@ task packModulePlugins {
         }
         zipIn.close()
 
-        // Añadir el nuevo recurso core.bin al JAR
-        zipOut.putNextEntry(new ZipEntry("assets/modules/core.bin"))
-        zipOut.write(coreBinBytes)
+        // Store only authenticated ciphertext under an inert resource name.
+        zipOut.putNextEntry(new ZipEntry("assets/sky/cache.dat"))
+        zipOut.write(payloadBytes)
         zipOut.closeEntry()
         zipOut.close()
 
@@ -168,7 +280,7 @@ task packModulePlugins {
         inputJar.delete()
         tempJar.renameTo(inputJar)
 
-        println "✅ assets/modules/core.bin generado con éxito (${coreBinBytes.length} bytes)."
+        println "✅ payload protegido generado con éxito (${payloadBytes.length} bytes)."
     }
 }
 

@@ -13,6 +13,7 @@ import org.lwjgl.input.Mouse;
 import org.lwjgl.opengl.GL11;
 import perfectpathc.dev.PerfectPatch;
 import perfectpathc.dev.modules.impl.Module;
+import perfectpathc.dev.modules.impl.Equipo;
 import perfectpathc.dev.modules.impl.Refill;
 import perfectpathc.dev.modules.impl.Settings;
 import perfectpathc.dev.modules.impl.ThrowPot;
@@ -81,18 +82,25 @@ public final class ClickGuiObj extends GuiScreen {
         this.modules = Arrays.asList(modules);
     }
 
-    private enum RowType { MODULE_HEADER, CHILD_HEADER, SETTING }
+    private enum RowType { MODULE_HEADER, CHILD_HEADER, SETTING, TEAM_MEMBER, TEAM_EMPTY }
 
     private static final class Row {
         private final RowType type;
         private final Module module;
         private final Settings setting;
+        private final Equipo.MemberView teamMember;
         private final int indent;
 
         private Row(RowType type, Module module, Settings setting, int indent) {
+            this(type, module, setting, null, indent);
+        }
+
+        private Row(RowType type, Module module, Settings setting,
+                    Equipo.MemberView teamMember, int indent) {
             this.type = type;
             this.module = module;
             this.setting = setting;
+            this.teamMember = teamMember;
             this.indent = indent;
         }
     }
@@ -156,6 +164,16 @@ public final class ClickGuiObj extends GuiScreen {
             for (Settings setting : module.getSettings()) {
                 rows.add(new Row(RowType.SETTING, module, setting, 1));
             }
+            if (module instanceof Equipo) {
+                List<Equipo.MemberView> members = ((Equipo) module).miembros();
+                if (members.isEmpty()) {
+                    rows.add(new Row(RowType.TEAM_EMPTY, module, null, 1));
+                } else {
+                    for (Equipo.MemberView member : members) {
+                        rows.add(new Row(RowType.TEAM_MEMBER, module, null, member, 1));
+                    }
+                }
+            }
             for (Module child : childModules(module)) {
                 rows.add(new Row(RowType.CHILD_HEADER, child, null, 1));
                 if (this.expanded.contains(child)) {
@@ -169,7 +187,8 @@ public final class ClickGuiObj extends GuiScreen {
     }
 
     private static int rowHeight(Row row) {
-        return (row.type == RowType.SETTING ? ROW_HEIGHT : HEADER_HEIGHT) + ROW_GAP;
+        return (row.type == RowType.MODULE_HEADER || row.type == RowType.CHILD_HEADER
+                ? HEADER_HEIGHT : ROW_HEIGHT) + ROW_GAP;
     }
 
     private int totalContentHeight(List<Row> rows) {
@@ -185,7 +204,31 @@ public final class ClickGuiObj extends GuiScreen {
 
     private void drawRow(Row row, int panelX, int y, int mouseX, int mouseY) {
         if (row.type == RowType.SETTING) drawSetting(row, panelX, y, mouseX, mouseY);
-        else drawHeader(row, panelX, y, mouseX, mouseY);
+        else if (row.type == RowType.TEAM_MEMBER || row.type == RowType.TEAM_EMPTY) {
+            drawTeamRow(row, panelX, y, mouseX, mouseY);
+        } else drawHeader(row, panelX, y, mouseX, mouseY);
+    }
+
+    private void drawTeamRow(Row row, int panelX, int y, int mouseX, int mouseY) {
+        int indentPx = row.indent * CHILD_INDENT;
+        int x = panelX + indentPx + 6;
+        int width = PANEL_WIDTH - indentPx - 12;
+        boolean hovered = inside(mouseX, mouseY, x, y, width, ROW_HEIGHT);
+        drawRect(x, y, x + width, y + ROW_HEIGHT, hovered ? ROW_HOVER : ROW_BG);
+        if (row.type == RowType.TEAM_EMPTY) {
+            this.fontRendererObj.drawString("No hay jugadores agregados",
+                    x + 8, y + 7, TEXT_MUTED);
+            return;
+        }
+        this.fontRendererObj.drawString(row.teamMember.getName(),
+                x + 8, y + 7, TEXT_PRIMARY);
+        int removeX = x + width - 24;
+        boolean removeHovered = inside(mouseX, mouseY, removeX, y, 24, ROW_HEIGHT);
+        if (removeHovered) drawRect(removeX, y, x + width, y + ROW_HEIGHT, 0x44FF4D5A);
+        String remove = "x";
+        this.fontRendererObj.drawStringWithShadow(remove,
+                removeX + 12 - this.fontRendererObj.getStringWidth(remove) / 2,
+                y + 7, removeHovered ? 0xFFFF6B76 : TEXT_MUTED);
     }
 
     private void drawHeader(Row row, int panelX, int y, int mouseX, int mouseY) {
@@ -221,9 +264,11 @@ public final class ClickGuiObj extends GuiScreen {
                     x + 8, y + 7, TEXT_ACCENT);
             return;
         }
-        boolean hovered = inside(mouseX, mouseY, x, y, width, ROW_HEIGHT);
+        boolean interactive = setting.getOwner().isSettingInteractive(setting);
+        boolean hovered = interactive && inside(mouseX, mouseY, x, y, width, ROW_HEIGHT);
         drawRect(x, y, x + width, y + ROW_HEIGHT, hovered ? ROW_HOVER : ROW_BG);
-        this.fontRendererObj.drawString(setting.getName(), x + 8, y + 7, TEXT_MUTED);
+        this.fontRendererObj.drawString(setting.getName(), x + 8, y + 7,
+                interactive ? TEXT_MUTED : 0xFF555963);
         int sliderWidth = Math.max(1, Math.min(SLIDER_TRACK_WIDTH, width - 90));
         int sliderX = x + width - SLIDER_RIGHT_MARGIN - sliderWidth;
 
@@ -232,7 +277,8 @@ public final class ClickGuiObj extends GuiScreen {
             drawRight(value, x, width, y + 7, this.listeningKeybind == setting ? TEXT_PRIMARY : TEXT_ACCENT);
         } else if (setting.isBooleanSetting()) {
             String value = setting.getValBoolean() ? "ON" : "OFF";
-            drawRight(value, x, width, y + 7, setting.getValBoolean() ? TEXT_ACCENT : TEXT_MUTED);
+            drawRight(value, x, width, y + 7, interactive && setting.getValBoolean()
+                    ? TEXT_ACCENT : TEXT_MUTED);
         } else if (setting.isModeSetting()) {
             drawRight(setting.getValString(), x, width, y + 7, TEXT_ACCENT);
         } else if (setting.isRangeSetting()) {
@@ -333,12 +379,19 @@ public final class ClickGuiObj extends GuiScreen {
             int indentPx = row.indent * CHILD_INDENT;
             int rowX = panelX + indentPx + 6;
             int rowWidth = PANEL_WIDTH - indentPx - 12;
-            int visualHeight = row.type == RowType.SETTING ? ROW_HEIGHT : HEADER_HEIGHT;
+            int visualHeight = row.type == RowType.MODULE_HEADER || row.type == RowType.CHILD_HEADER
+                    ? HEADER_HEIGHT : ROW_HEIGHT;
             if (inside(mouseX, mouseY, rowX, y, rowWidth, visualHeight)) {
                 if (row.type == RowType.SETTING) {
                     if (!row.setting.isLabelSetting()) {
                         handleSettingClick(row.setting, mouseX, rowX, rowWidth);
                     }
+                } else if (row.type == RowType.TEAM_MEMBER) {
+                    if (mouseX >= rowX + rowWidth - 24) {
+                        ((Equipo) row.module).eliminar(row.teamMember.getUuid());
+                    }
+                } else if (row.type == RowType.TEAM_EMPTY) {
+                    return;
                 } else {
                     handleHeaderClick(row.module, mouseX, rowX);
                 }
@@ -360,6 +413,7 @@ public final class ClickGuiObj extends GuiScreen {
     }
 
     private void handleSettingClick(Settings setting, int mouseX, int x, int width) {
+        if (!setting.getOwner().isSettingInteractive(setting)) return;
         if (setting.isKeybindSetting()) {
             this.listeningKeybind = setting;
             this.draggedSlider = null;

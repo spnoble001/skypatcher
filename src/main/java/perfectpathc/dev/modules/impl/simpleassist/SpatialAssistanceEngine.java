@@ -12,6 +12,7 @@ import net.minecraft.util.MovingObjectPosition;
 import net.minecraft.util.Vec3;
 import net.minecraft.world.World;
 import perfectpathc.dev.modules.impl.utils.AimUtils;
+import perfectpathc.dev.modules.impl.utils.GlobalSpatialAssistance;
 import perfectpathc.dev.modules.impl.utils.XObject;
 
 /**
@@ -26,7 +27,12 @@ public final class SpatialAssistanceEngine {
     private static final double RAYTRACE_FACE_PENETRATION = 0.001D;
     /** Keeps a projected click off 1.8.9 face edges/corners. */
     private static final double FACE_INTERIOR_INSET = 0.05D;
-    private static final double MAX_PHYSICAL_REACH = 4.5D;
+    /** Projection first, then center and four stable interior subpixels. */
+    private static final double[][] VIRTUAL_FACE_SAMPLES = {
+            {0.50D, 0.50D},
+            {0.15D, 0.15D}, {0.85D, 0.15D},
+            {0.85D, 0.85D}, {0.15D, 0.85D}
+    };
     private static final float MAX_CREDITS = 2.0F;
     private static final float INTERACTION_COST = 1.0F;
 
@@ -197,10 +203,14 @@ public final class SpatialAssistanceEngine {
                                                      TargetFilter filter) {
         if (!hasRuntime(minecraft) || radius < 0.0D || reach <= 0.0D) return null;
         EntityPlayerSP player = minecraft.thePlayer;
+        // Acquisition and dispatch share the same non-negotiable physical
+        // envelope. A controller reach above this value must not let a
+        // virtual target enter a route that execution would later reject.
+        double physicalReach = Math.min(reach, maximumPhysicalReach());
         Vec3 eyePos = new Vec3(player.posX, player.posY + player.getEyeHeight(), player.posZ);
         Vec3 lookVec = player.getLookVec();
-        Vec3 rayEnd = eyePos.addVector(lookVec.xCoord * reach,
-                lookVec.yCoord * reach, lookVec.zCoord * reach);
+        Vec3 rayEnd = eyePos.addVector(lookVec.xCoord * physicalReach,
+                lookVec.yCoord * physicalReach, lookVec.zCoord * physicalReach);
         int padding = (int)Math.ceil(radius) + 1;
         BlockPos minimum = new BlockPos(Math.min(eyePos.xCoord, rayEnd.xCoord) - padding,
                 Math.min(eyePos.yCoord, rayEnd.yCoord) - padding,
@@ -209,31 +219,231 @@ public final class SpatialAssistanceEngine {
                 Math.max(eyePos.yCoord, rayEnd.yCoord) + padding,
                 Math.max(eyePos.zCoord, rayEnd.zCoord) + padding);
 
-        TargetPlacement best = null;
-        double closestDistance = Double.MAX_VALUE;
+        // The world scan is deliberately cheap: retain only the three faces
+        // geometrically closest to the visual ray. LOS is evaluated later and
+        // only for these bounded finalists.
+        BlockPos firstAnchor = null, secondAnchor = null, thirdAnchor = null;
+        EnumFacing firstSide = null, secondSide = null, thirdSide = null;
+        double firstDistance = Double.MAX_VALUE;
+        double secondDistance = Double.MAX_VALUE;
+        double thirdDistance = Double.MAX_VALUE;
+        BlockPos.MutableBlockPos exposedCell = new BlockPos.MutableBlockPos();
         for (BlockPos.MutableBlockPos cursor : BlockPos.getAllInBoxMutable(minimum, maximum)) {
-            // 1.8.9 MutableBlockPos has no toImmutable() helper.
+            if (!isWithinBlockReach(eyePos, cursor, physicalReach)
+                    || !isSolidSupport(minecraft.theWorld, cursor)) continue;
+            // 1.8.9 MutableBlockPos has no toImmutable() helper. Do not pass
+            // a mutable coordinate into the caller predicate or retain it.
             BlockPos anchor = new BlockPos(cursor.getX(), cursor.getY(), cursor.getZ());
-            if (!isSolidSupport(minecraft.theWorld, anchor)) continue;
             for (EnumFacing side : EnumFacing.VALUES) {
-                if (requiredTarget != null && !requiredTarget.equals(anchor.offset(side))) continue;
+                if (requiredTarget != null && (requiredTarget.getX() != anchor.getX() + side.getFrontOffsetX()
+                        || requiredTarget.getY() != anchor.getY() + side.getFrontOffsetY()
+                        || requiredTarget.getZ() != anchor.getZ() + side.getFrontOffsetZ())) continue;
                 if (filter != null && !filter.matches(anchor, side)) continue;
-                if (!isExposedFace(minecraft.theWorld, anchor, side)) continue;
-                Vec3 hitVector = nearestPointOnFace(eyePos, anchor, side);
-                double forwardDistance = forwardDistance(eyePos, lookVec, hitVector);
-                double distanceToRay = distanceToLookRay(eyePos, lookVec, hitVector);
-                if (forwardDistance < 0.0D || forwardDistance > reach
-                        || eyePos.squareDistanceTo(hitVector) > reach * reach
-                        || distanceToRay > radius || distanceToRay >= closestDistance
-                        || !hasUnobstructedLineOfSight(minecraft.theWorld, eyePos,
-                        hitVector, anchor, side)) {
-                    continue;
+                if (!isFaceFacingEye(eyePos, anchor, side)) continue;
+                if (!isExposedFace(minecraft.theWorld, anchor, side, exposedCell)) continue;
+                double distance = minimumVirtualFaceDistanceToRay(eyePos, lookVec, anchor, side,
+                        physicalReach);
+                // This evaluates the exact finite sample set without a world
+                // raytrace, so rejecting it cannot hide a later valid sample.
+                if (distance > radius) continue;
+                if (distance < firstDistance) {
+                    thirdAnchor = secondAnchor; thirdSide = secondSide; thirdDistance = secondDistance;
+                    secondAnchor = firstAnchor; secondSide = firstSide; secondDistance = firstDistance;
+                    firstAnchor = anchor; firstSide = side; firstDistance = distance;
+                } else if (distance < secondDistance) {
+                    thirdAnchor = secondAnchor; thirdSide = secondSide; thirdDistance = secondDistance;
+                    secondAnchor = anchor; secondSide = side; secondDistance = distance;
+                } else if (distance < thirdDistance) {
+                    thirdAnchor = anchor; thirdSide = side; thirdDistance = distance;
                 }
-                closestDistance = distanceToRay;
-                best = new TargetPlacement(anchor, side, hitVector);
             }
         }
-        return best;
+
+        TargetPlacement placement = validateVirtualFinalist(minecraft.theWorld, eyePos, lookVec,
+                firstAnchor, firstSide, physicalReach, radius);
+        if (placement != null) return placement;
+        placement = validateVirtualFinalist(minecraft.theWorld, eyePos, lookVec,
+                secondAnchor, secondSide, physicalReach, radius);
+        if (placement != null) return placement;
+        return validateVirtualFinalist(minecraft.theWorld, eyePos, lookVec,
+                thirdAnchor, thirdSide, physicalReach, radius);
+    }
+
+    /** Performs the only costly LOS phase, after cheap top-three selection. */
+    private static TargetPlacement validateVirtualFinalist(World world, Vec3 eye, Vec3 look,
+                                                           BlockPos anchor, EnumFacing side,
+                                                           double reach, double radius) {
+        if (anchor == null || side == null) return null;
+        FaceSample sample = findVirtualFaceSample(world, eye, look, anchor, side, reach, radius);
+        return sample == null ? null : new TargetPlacement(anchor, side, sample.hitVector);
+    }
+
+    /** True when at least one point of the block volume can satisfy physical reach. */
+    private static boolean isWithinBlockReach(Vec3 eye, BlockPos block, double reach) {
+        double dx = eye.xCoord < block.getX() ? block.getX() - eye.xCoord
+                : eye.xCoord > block.getX() + 1.0D ? eye.xCoord - (block.getX() + 1.0D) : 0.0D;
+        double dy = eye.yCoord < block.getY() ? block.getY() - eye.yCoord
+                : eye.yCoord > block.getY() + 1.0D ? eye.yCoord - (block.getY() + 1.0D) : 0.0D;
+        double dz = eye.zCoord < block.getZ() ? block.getZ() - eye.zCoord
+                : eye.zCoord > block.getZ() + 1.0D ? eye.zCoord - (block.getZ() + 1.0D) : 0.0D;
+        return dx * dx + dy * dy + dz * dz <= reach * reach;
+    }
+
+    /** Poda caras que un rayo desde el ojo no puede alcanzar como primera superficie. */
+    private static boolean isFaceFacingEye(Vec3 eye, BlockPos anchor, EnumFacing side) {
+        final double epsilon = 0.001D;
+        switch (side) {
+            case DOWN: return eye.yCoord <= anchor.getY() + epsilon;
+            case UP: return eye.yCoord >= anchor.getY() + 1.0D - epsilon;
+            case NORTH: return eye.zCoord <= anchor.getZ() + epsilon;
+            case SOUTH: return eye.zCoord >= anchor.getZ() + 1.0D - epsilon;
+            case WEST: return eye.xCoord <= anchor.getX() + epsilon;
+            case EAST: return eye.xCoord >= anchor.getX() + 1.0D - epsilon;
+            default: return false;
+        }
+    }
+
+    /** Cheap counterpart of findVirtualFaceSample: it performs no world access or LOS. */
+    private static double minimumVirtualFaceDistanceToRay(Vec3 eye, Vec3 look,
+                                                          BlockPos support, EnumFacing side,
+                                                          double reach) {
+        double minimumX = support.getX() + FACE_INTERIOR_INSET;
+        double maximumX = support.getX() + 1.0D - FACE_INTERIOR_INSET;
+        double minimumY = support.getY() + FACE_INTERIOR_INSET;
+        double maximumY = support.getY() + 1.0D - FACE_INTERIOR_INSET;
+        double minimumZ = support.getZ() + FACE_INTERIOR_INSET;
+        double maximumZ = support.getZ() + 1.0D - FACE_INTERIOR_INSET;
+        double projectedX;
+        double projectedY;
+        double projectedZ;
+        switch (side) {
+            case DOWN:
+                projectedX = clamp(eye.xCoord, minimumX, maximumX);
+                projectedY = support.getY();
+                projectedZ = clamp(eye.zCoord, minimumZ, maximumZ);
+                break;
+            case UP:
+                projectedX = clamp(eye.xCoord, minimumX, maximumX);
+                projectedY = support.getY() + 1.0D;
+                projectedZ = clamp(eye.zCoord, minimumZ, maximumZ);
+                break;
+            case NORTH:
+                projectedX = clamp(eye.xCoord, minimumX, maximumX);
+                projectedY = clamp(eye.yCoord, minimumY, maximumY);
+                projectedZ = support.getZ();
+                break;
+            case SOUTH:
+                projectedX = clamp(eye.xCoord, minimumX, maximumX);
+                projectedY = clamp(eye.yCoord, minimumY, maximumY);
+                projectedZ = support.getZ() + 1.0D;
+                break;
+            case WEST:
+                projectedX = support.getX();
+                projectedY = clamp(eye.yCoord, minimumY, maximumY);
+                projectedZ = clamp(eye.zCoord, minimumZ, maximumZ);
+                break;
+            case EAST:
+                projectedX = support.getX() + 1.0D;
+                projectedY = clamp(eye.yCoord, minimumY, maximumY);
+                projectedZ = clamp(eye.zCoord, minimumZ, maximumZ);
+                break;
+            default:
+                return Double.MAX_VALUE;
+        }
+        double closest = admissibleFacePointDistanceToRay(eye, look,
+                projectedX, projectedY, projectedZ, reach);
+        for (double[] coordinates : VIRTUAL_FACE_SAMPLES) {
+            double u = coordinates[0];
+            double v = coordinates[1];
+            double sampleX;
+            double sampleY;
+            double sampleZ;
+            switch (side) {
+                case DOWN: sampleX = support.getX() + u; sampleY = support.getY(); sampleZ = support.getZ() + v; break;
+                case UP: sampleX = support.getX() + u; sampleY = support.getY() + 1.0D; sampleZ = support.getZ() + v; break;
+                case NORTH: sampleX = support.getX() + u; sampleY = support.getY() + v; sampleZ = support.getZ(); break;
+                case SOUTH: sampleX = support.getX() + u; sampleY = support.getY() + v; sampleZ = support.getZ() + 1.0D; break;
+                case WEST: sampleX = support.getX(); sampleY = support.getY() + u; sampleZ = support.getZ() + v; break;
+                case EAST: sampleX = support.getX() + 1.0D; sampleY = support.getY() + u; sampleZ = support.getZ() + v; break;
+                default: continue;
+            }
+            double distance = admissibleFacePointDistanceToRay(eye, look,
+                    sampleX, sampleY, sampleZ, reach);
+            if (distance < closest) closest = distance;
+        }
+        return closest;
+    }
+
+    /** Applies all cheap hard constraints; LOS remains exclusive to the final phase. */
+    private static double admissibleFacePointDistanceToRay(Vec3 eye, Vec3 look,
+                                                           double pointX, double pointY,
+                                                           double pointZ, double reach) {
+        double lookLengthSquared = look.xCoord * look.xCoord + look.yCoord * look.yCoord
+                + look.zCoord * look.zCoord;
+        if (lookLengthSquared <= 0.0D) return Double.MAX_VALUE;
+        double forward = ((pointX - eye.xCoord) * look.xCoord
+                + (pointY - eye.yCoord) * look.yCoord
+                + (pointZ - eye.zCoord) * look.zCoord)
+                / lookLengthSquared;
+        if (forward < 0.0D || forward > reach
+                || squareDistance(eye, pointX, pointY, pointZ) > reach * reach) return Double.MAX_VALUE;
+        double closestX = eye.xCoord + look.xCoord * forward;
+        double closestY = eye.yCoord + look.yCoord * forward;
+        double closestZ = eye.zCoord + look.zCoord * forward;
+        double offsetX = pointX - closestX;
+        double offsetY = pointY - closestY;
+        double offsetZ = pointZ - closestZ;
+        return Math.sqrt(offsetX * offsetX + offsetY * offsetY + offsetZ * offsetZ);
+    }
+
+    private static double squareDistance(Vec3 origin, double x, double y, double z) {
+        double dx = x - origin.xCoord;
+        double dy = y - origin.yCoord;
+        double dz = z - origin.zCoord;
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    /**
+     * A virtual cone is a distance-to-ray constraint, not a closest-to-eye
+     * constraint. Evaluate a bounded face matrix so a valid exposed subpixel
+     * cannot be discarded merely because the eye projection falls outside the
+     * cone or grazes a solid block edge.
+     */
+    private static FaceSample findVirtualFaceSample(World world, Vec3 eye, Vec3 look,
+                                                    BlockPos support, EnumFacing side,
+                                                    double reach, double radius) {
+        Vec3 projected = nearestPointOnFace(eye, support, side);
+        FaceSample projectedSample = validateVirtualFacePoint(world, eye, look, projected,
+                support, side, reach, radius);
+        // The eye projection is the most stable and natural C08 point. Face
+        // samples exist only to recover a geometrically valid exposed margin
+        // when that primary point is not admissible.
+        if (projectedSample != null) return projectedSample;
+
+        Vec3 bestPoint = null;
+        double bestDistanceToRay = Double.MAX_VALUE;
+        for (double[] coordinates : VIRTUAL_FACE_SAMPLES) {
+            Vec3 sample = pointOnFace(support, side, coordinates[0], coordinates[1]);
+            FaceSample valid = validateVirtualFacePoint(world, eye, look, sample,
+                    support, side, reach, radius);
+            if (valid != null && valid.distanceToRay < bestDistanceToRay) {
+                bestPoint = valid.hitVector;
+                bestDistanceToRay = valid.distanceToRay;
+            }
+        }
+        return bestPoint == null ? null : new FaceSample(bestPoint, bestDistanceToRay);
+    }
+
+    private static FaceSample validateVirtualFacePoint(World world, Vec3 eye, Vec3 look,
+                                                        Vec3 hit, BlockPos support,
+                                                        EnumFacing side, double reach,
+                                                        double radius) {
+        double forward = forwardDistance(eye, look, hit);
+        double distanceToRay = distanceToLookRay(eye, look, hit);
+        if (forward < 0.0D || forward > reach || eye.squareDistanceTo(hit) > reach * reach
+                || distanceToRay > radius
+                || !hasUnobstructedLineOfSight(world, eye, hit, support, side)) return null;
+        return new FaceSample(hit, distanceToRay);
     }
 
     /**
@@ -292,7 +502,8 @@ public final class SpatialAssistanceEngine {
             return false;
         }
         Vec3 eyePos = new Vec3(player.posX, player.posY + player.getEyeHeight(), player.posZ);
-        if (eyePos.squareDistanceTo(hitVec) > MAX_PHYSICAL_REACH * MAX_PHYSICAL_REACH) return false;
+        double maximumReach = maximumPhysicalReach();
+        if (eyePos.squareDistanceTo(hitVec) > maximumReach * maximumReach) return false;
 
         return true;
     }
@@ -390,6 +601,20 @@ public final class SpatialAssistanceEngine {
         }
     }
 
+    /** Maps stable local (u,v) face coordinates to an exact world hit point. */
+    private static Vec3 pointOnFace(BlockPos position, EnumFacing side, double u, double v) {
+        switch (side) {
+            case DOWN: return new Vec3(position.getX() + u, position.getY(), position.getZ() + v);
+            case UP: return new Vec3(position.getX() + u, position.getY() + 1.0D, position.getZ() + v);
+            case NORTH: return new Vec3(position.getX() + u, position.getY() + v, position.getZ());
+            case SOUTH: return new Vec3(position.getX() + u, position.getY() + v, position.getZ() + 1.0D);
+            case WEST: return new Vec3(position.getX(), position.getY() + u, position.getZ() + v);
+            case EAST: return new Vec3(position.getX() + 1.0D, position.getY() + u, position.getZ() + v);
+            default: return new Vec3(position.getX() + 0.5D, position.getY() + 0.5D,
+                    position.getZ() + 0.5D);
+        }
+    }
+
     private static boolean isExecutionPointValid(World world, Vec3 eye, Vec3 look, Vec3 hit,
                                                   BlockPos support, EnumFacing side, double reach,
                                                   boolean cone, boolean queued) {
@@ -398,19 +623,28 @@ public final class SpatialAssistanceEngine {
                 : hasUnobstructedLineOfSight(world, eye, hit, support, side));
     }
 
-    /** Legacy projection stays primary; these four are fallback only. */
+    /** Legacy projection stays primary; stable face corners are fallback only. */
     private static Vec3 fallbackFacePoint(World world, Vec3 eye, Vec3 look, BlockPos pos,
                                           EnumFacing side, double reach, boolean cone) {
-        double[] p={.15D,.15D,.85D,.15D,.85D,.85D,.15D,.85D};
-        for(int i=0;i<p.length;i+=2){ double a=p[i],b=p[i+1]; Vec3 h;
-            switch(side){case DOWN:h=new Vec3(pos.getX()+a,pos.getY(),pos.getZ()+b);break;case UP:h=new Vec3(pos.getX()+a,pos.getY()+1,pos.getZ()+b);break;case NORTH:h=new Vec3(pos.getX()+a,pos.getY()+b,pos.getZ());break;case SOUTH:h=new Vec3(pos.getX()+a,pos.getY()+b,pos.getZ()+1);break;case WEST:h=new Vec3(pos.getX(),pos.getY()+a,pos.getZ()+b);break;default:h=new Vec3(pos.getX()+1,pos.getY()+a,pos.getZ()+b);}
-            if(isExecutionPointValid(world,eye,look,h,pos,side,reach,cone,false)) return h;
-        } return null;
+        for (double[] coordinates : VIRTUAL_FACE_SAMPLES) {
+            // The execution primary already tried the eye projection. Keep
+            // this fallback restricted to the four interior corners.
+            if (coordinates[0] == 0.50D && coordinates[1] == 0.50D) continue;
+            Vec3 hit = pointOnFace(pos, side, coordinates[0], coordinates[1]);
+            if (isExecutionPointValid(world, eye, look, hit, pos, side, reach, cone, false)) {
+                return hit;
+            }
+        }
+        return null;
     }
 
 
     private static double clamp(double value, double minimum, double maximum) {
         return Math.max(minimum, Math.min(maximum, value));
+    }
+
+    private static double maximumPhysicalReach() {
+        return GlobalSpatialAssistance.maximumPhysicalReach();
     }
 
     private static boolean hasRuntime(Minecraft minecraft) {
@@ -423,10 +657,12 @@ public final class SpatialAssistanceEngine {
         return !block.isReplaceable(world, position) && block.canCollideCheck(state, false);
     }
 
-    private static boolean isExposedFace(World world, BlockPos anchor, EnumFacing side) {
-        BlockPos adjacent = anchor.offset(side);
-        IBlockState state = world.getBlockState(adjacent);
-        return state.getBlock().isReplaceable(world, adjacent);
+    private static boolean isExposedFace(World world, BlockPos anchor, EnumFacing side,
+                                         BlockPos.MutableBlockPos scratch) {
+        scratch.set(anchor.getX() + side.getFrontOffsetX(), anchor.getY() + side.getFrontOffsetY(),
+                anchor.getZ() + side.getFrontOffsetZ());
+        IBlockState state = world.getBlockState(scratch);
+        return state.getBlock().isReplaceable(world, scratch);
     }
 
     private static boolean hasUnobstructedLineOfSight(World world, Vec3 eyePos,
@@ -457,6 +693,17 @@ public final class SpatialAssistanceEngine {
     /** Identifies virtual hits that the caller may admit into its state machine. */
     public interface TargetFilter {
         boolean matches(BlockPos anchorNode, EnumFacing side);
+    }
+
+    /** A face point accepted by the virtual acquisition constraints. */
+    private static final class FaceSample {
+        private final Vec3 hitVector;
+        private final double distanceToRay;
+
+        private FaceSample(Vec3 hitVector, double distanceToRay) {
+            this.hitVector = hitVector;
+            this.distanceToRay = distanceToRay;
+        }
     }
 
     /** Immutable support block, face and hit point selected by the virtual raycast. */

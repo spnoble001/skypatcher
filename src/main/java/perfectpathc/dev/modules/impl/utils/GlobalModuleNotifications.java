@@ -16,7 +16,10 @@ public final class GlobalModuleNotifications {
     public static void setEnabled(boolean value) { enabled = value; }
 
     public static void announce(Module module) {
-        if (!enabled || module == null) return;
+        // Momentary actions such as ThrowPot self-disable after completing and
+        // may be triggered many times per fight. They are not meaningful
+        // persistent state changes and should not flood chat on every press.
+        if (!enabled || module == null || !module.isPersistentToggle()) return;
         Minecraft minecraft = Minecraft.getMinecraft();
         if (minecraft.thePlayer == null) return;
         minecraft.thePlayer.addChatMessage(new ChatComponentText(PREFIX + module.getName()

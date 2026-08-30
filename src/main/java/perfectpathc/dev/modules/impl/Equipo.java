@@ -1,5 +1,8 @@
 package perfectpathc.dev.modules.impl;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.UUID;
 import java.nio.charset.StandardCharsets;
 import com.mojang.authlib.GameProfile;
@@ -10,7 +13,7 @@ import net.minecraft.util.AxisAlignedBB;
 import net.minecraft.util.IChatComponent;
 import org.lwjgl.opengl.GL11;
 
-/** Stateless Forge adapter for Rust-owned team membership and persistence. */
+/** Stateless Forge adapter for Rust-owned, session-only team membership. */
 @Mod(keybind = 0)
 public final class Equipo extends Module {
 
@@ -50,7 +53,7 @@ public final class Equipo extends Module {
         int end = tokenEnd(ign, start);
         if (start == end || skipWhitespace(ign, end) != ign.length()) return false;
         TeamPlayer player = findPlayer(ign, start, end);
-        return player != null && addPlayer(player.uuid);
+        return player != null && addPlayer(player.uuid, player.name);
     }
 
     public boolean eliminar(UUID uuid) {
@@ -63,8 +66,11 @@ public final class Equipo extends Module {
         if (command == null) return false;
         int commandStart = skipWhitespace(command, 0);
         int commandEnd = tokenEnd(command, commandStart);
-        if (commandEnd - commandStart != 7
-                || tokenHash(command, commandStart, commandEnd) != 874988525) return false;
+        int commandLength = commandEnd - commandStart;
+        int commandHash = tokenHash(command, commandStart, commandEnd);
+        boolean fullCommand = commandLength == 7 && commandHash == 874988525;
+        boolean shortCommand = commandLength == 2 && commandHash == 1527;
+        if (!fullCommand && !shortCommand) return false;
         int argumentStart = skipWhitespace(command, commandEnd);
         if (argumentStart == command.length()) {
             announceUsage();
@@ -85,7 +91,7 @@ public final class Equipo extends Module {
             return true;
         }
         String playerName = player.name;
-        int toggleResult = togglePlayer(player.uuid);
+        int toggleResult = togglePlayer(player);
         if (toggleResult == 1) {
             announce(playerName + text(19,
                     0x5a3b5aab5a3b5a7aL, 0x5a355a3e5a335a3eL,
@@ -107,25 +113,87 @@ public final class Equipo extends Module {
         return true;
     }
 
-    private int togglePlayer(UUID uuid) {
-        if (uuid == null || !NativeBridge.isNativeAvailable()) return 0;
-        long most = uuid.getMostSignificantBits();
-        long least = uuid.getLeastSignificantBits();
+    private int togglePlayer(TeamPlayer player) {
+        if (player == null || player.uuid == null || !NativeBridge.isNativeAvailable()) return 0;
+        long most = player.uuid.getMostSignificantBits();
+        long least = player.uuid.getLeastSignificantBits();
         try {
             if (NativeBridge.equipoContains(most, least)) {
                 return NativeBridge.equipoRemove(most, least) ? 2 : 0;
             }
-            return NativeBridge.equipoAdd(most, least) ? 1 : 0;
+            return NativeBridge.equipoAdd(most, least, player.name) ? 1 : 0;
         } catch (IllegalStateException ignored) {
             return 0;
         }
     }
 
-    private boolean addPlayer(UUID uuid) {
+    private boolean addPlayer(UUID uuid, String name) {
         if (uuid == null || !NativeBridge.isNativeAvailable()) return false;
         try { return NativeBridge.equipoAdd(
-                uuid.getMostSignificantBits(), uuid.getLeastSignificantBits()); }
+                uuid.getMostSignificantBits(), uuid.getLeastSignificantBits(), name); }
         catch (IllegalStateException ignored) { return false; }
+    }
+
+    /** Stable snapshot consumed by the ClickGUI; callers cannot mutate native state. */
+    public List<MemberView> miembros() {
+        if (!NativeBridge.isNativeAvailable()) return Collections.emptyList();
+        try {
+            int count = Math.max(0, Math.min(256, NativeBridge.equipoCount()));
+            List<MemberView> members = new ArrayList<MemberView>(count);
+            for (int index = 0; index < count; index++) {
+                UUID uuid = new UUID(NativeBridge.equipoMemberMost(index),
+                        NativeBridge.equipoMemberLeast(index));
+                String name = NativeBridge.equipoMemberName(index);
+                if (name.length() == 0) {
+                    name = resolvePlayerName(uuid);
+                    if (name != null) {
+                        // Migrates UUID-only entries without changing membership.
+                        NativeBridge.equipoAdd(uuid.getMostSignificantBits(),
+                                uuid.getLeastSignificantBits(), name);
+                    }
+                }
+                if (name == null || name.length() == 0) name = shortUuid(uuid);
+                members.add(new MemberView(name, uuid));
+            }
+            return members;
+        } catch (IllegalStateException ignored) {
+            return Collections.emptyList();
+        }
+    }
+
+    private String resolvePlayerName(UUID uuid) {
+        if (uuid == null) return null;
+        if (this.minecraft.theWorld != null) {
+            for (int index = 0; index < this.minecraft.theWorld.playerEntities.size(); index++) {
+                EntityPlayer player = this.minecraft.theWorld.playerEntities.get(index);
+                if (player != null && uuid.equals(player.getUniqueID())) return player.getName();
+            }
+        }
+        if (this.minecraft.getNetHandler() != null) {
+            for (NetworkPlayerInfo info : this.minecraft.getNetHandler().getPlayerInfoMap()) {
+                GameProfile profile = info == null ? null : info.getGameProfile();
+                if (profile != null && uuid.equals(profile.getId())) return profile.getName();
+            }
+        }
+        return null;
+    }
+
+    private static String shortUuid(UUID uuid) {
+        String value = uuid.toString();
+        return value.substring(0, 8);
+    }
+
+    public static final class MemberView {
+        private final String name;
+        private final UUID uuid;
+
+        private MemberView(String name, UUID uuid) {
+            this.name = name;
+            this.uuid = uuid;
+        }
+
+        public String getName() { return this.name; }
+        public UUID getUuid() { return this.uuid; }
     }
 
     /** Resolve from loaded entities first, then from the tab list for remote players. */

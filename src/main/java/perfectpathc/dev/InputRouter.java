@@ -23,17 +23,18 @@ public final class InputRouter {
     private static final String COMMAND_PATCH = text(6, 0x5A2E5A3B5A2A5A74L,
             0x000000005A325A39L);
     private static final String PRESET_ONE = text(1, 0x0000000000005A6BL);
-    private static final String PREPATCH_PREFIX = text(23,
-            0x5A3F5A285A0A5A01L, 0x5A395A2E5A3B5A0AL,
-            0x5A1E5A7A5A075A32L, 0x5A395A3F5A285A33L,
-            0x5AE95A995A335A39L, 0x00005A7A5A605A34L);
-    private static final String UNAVAILABLE = text(11, 0x5A2C5A3B5A345A2FL,
-            0x5A3B5A365A335A3BL, 0x00005A3F5A365A38L);
+    private static final String COMMAND_PRESET = text(7, 0x5A3F5A285A2A5A74L,
+            0x00005A2E5A3F5A29L);
+    private static final String PRESET_ZERO = text(4, 0x5A355A285A3F5A20L);
     private static final String PRESET_LOADED = text(31,
             0x5A285A3F5A0A5A01L, 0x5A2E5A395A3F5A3CL,
             0x5A395A2E5A3B5A0AL, 0x5A0A5A7A5A075A32L,
             0x5A3F5A295A3F5A28L, 0x5A7A5A6B5A7A5A2EL,
             0x5A3D5A285A3B5A39L, 0x00005A355A3E5A3BL);
+    private static final String ZERO_PRESET_LOADED = text(20,
+            0x5A295A3F5A285A0AL, 0x5A205A7A5A2E5A3FL,
+            0x5A7A5A355A285A3FL, 0x5A3D5A285A3B5A39L,
+            0x5A745A355A3E5A3BL);
     private final PerfectPatch client;
     private final boolean[] moduleKeyDown = new boolean[USER_MODULE_COUNT];
 
@@ -164,12 +165,7 @@ public final class InputRouter {
             event.setCanceled(true);
             Minecraft minecraft = Minecraft.getMinecraft();
             minecraft.displayGuiScreen(null);
-            Object direction = this.client.invokeModuleCommand(2, 19);
-            if (minecraft.thePlayer != null) {
-                minecraft.thePlayer.addChatMessage(new net.minecraft.util.ChatComponentText(
-                        PREPATCH_PREFIX + (direction instanceof String
-                                ? direction : UNAVAILABLE)));
-            }
+            this.client.invokeModuleCommand(2, 19);
             return;
         }
         if (matchesToken(command, firstStart, firstEnd, COMMAND_PATCH)
@@ -186,6 +182,34 @@ public final class InputRouter {
             }
             return;
         }
+        if (matchesToken(command, firstStart, firstEnd, COMMAND_PRESET)
+                && matchesToken(command, secondStart, secondEnd, PRESET_ZERO)
+                && thirdStart == command.length()) {
+            event.setCanceled(true);
+            Minecraft minecraft = Minecraft.getMinecraft();
+            minecraft.displayGuiScreen(null);
+
+            // ThrowPot is deliberately OFF in this preset. Stop any active
+            // one-shot sequence before replacing its configuration.
+            this.client.invokeModuleCommand(5, 3, Boolean.FALSE);
+            this.client.invokeModuleCommand(0, 24);
+            this.client.invokeModuleCommand(1, 24);
+            this.client.invokeModuleCommand(2, 24);
+            this.client.invokeModuleCommand(4, 24);
+            this.client.invokeModuleCommand(5, 24);
+
+            // Apply the desired lifecycle state explicitly: a preset is not
+            // merely a settings import.
+            this.client.invokeModuleCommand(0, 3, Boolean.TRUE);
+            this.client.invokeModuleCommand(1, 3, Boolean.TRUE);
+            this.client.invokeModuleCommand(2, 3, Boolean.TRUE);
+            this.client.invokeModuleCommand(4, 3, Boolean.TRUE);
+            if (minecraft.thePlayer != null) {
+                minecraft.thePlayer.addChatMessage(new net.minecraft.util.ChatComponentText(
+                        ZERO_PRESET_LOADED));
+            }
+            return;
+        }
         int firstHash = tokenHash(command, firstStart, firstEnd);
         int firstLength = firstEnd - firstStart;
         int secondHash = tokenHash(command, secondStart, secondEnd);
@@ -194,15 +218,17 @@ public final class InputRouter {
         boolean patch = !trailing && firstLength == 6 && firstHash == 1423379674;
         boolean combatGui = !trailing && firstLength == 3 && firstHash == 47843
                 && (secondLength == 0 || secondLength == 8 && secondHash == 570403011);
+        boolean equipoShort = !trailing && firstLength == 2 && firstHash == 1527;
         boolean unload = !trailing && firstLength == 9 && firstHash == -520810230;
         int action = patch ? 1 : combatGui ? 2 : unload ? 8
                 : (int) NativeBridge.invoke(224, new long[] {
                         firstHash, firstLength, secondHash, secondLength,
                         trailing ? 1L : 0L
                 });
-        boolean handled = unload || patch || combatGui || ((action & 4) != 0
-                && (bool(this.client.invokeModuleCommand(4, 4, command))
-                || bool(this.client.invokeModuleCommand(5, 4, command))
+        boolean handled = unload || patch || combatGui
+                || (equipoShort && bool(this.client.invokeModuleCommand(6, 4, command)))
+                || ((action & 4) != 0
+                && (bool(this.client.invokeModuleCommand(5, 4, command))
                 || bool(this.client.invokeModuleCommand(6, 4, command))));
         if (!handled) return;
         event.setCanceled(true);

@@ -1,23 +1,18 @@
 package perfectpathc.dev.modules.runtime;
 
-/** Instantiates an explicit entry point from an embedded module loader. */
+/** Instantiates the sole opaque entry point declared by an embedded container. */
 public final class ModuleLauncher {
     private ModuleLauncher() {
     }
 
-    public static IModuleEntry launch(EmbeddedModuleClassLoader loader, String entryClassName)
+    public static IEmbeddedRuntime launchRuntime(EmbeddedModuleClassLoader loader)
             throws ReflectiveOperationException {
         if (loader == null) throw new IllegalArgumentException("loader cannot be null");
-        if (entryClassName == null || entryClassName.length() == 0) {
-            throw new IllegalArgumentException("entryClassName cannot be empty");
-        }
-
+        String entryClassName = loader.getEntryPointClassName();
         Class<?> entryClass = Class.forName(entryClassName, true, loader);
-        if (!IModuleEntry.class.isAssignableFrom(entryClass)) {
-            throw new IllegalArgumentException(entryClassName + " does not implement IModuleEntry");
+        if (!IEmbeddedRuntime.class.isAssignableFrom(entryClass)) {
+            throw new IllegalArgumentException("Embedded entry point has an invalid contract");
         }
-        IModuleEntry entry = (IModuleEntry) entryClass.getDeclaredConstructor().newInstance();
-        entry.initialize();
-        return entry;
+        return (IEmbeddedRuntime) entryClass.getDeclaredConstructor().newInstance();
     }
 }

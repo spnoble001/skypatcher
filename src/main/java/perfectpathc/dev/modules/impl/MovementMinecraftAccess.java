@@ -1,12 +1,13 @@
 package perfectpathc.dev.modules.impl;
 
 import net.minecraft.block.material.Material;
+import net.minecraft.block.state.IBlockState;
 import net.minecraft.client.entity.EntityPlayerSP;
 import net.minecraft.util.AxisAlignedBB;
 import net.minecraft.util.BlockPos;
 import net.minecraft.world.World;
 
-/** Minecraft-only sampling used by the primitive AntiFall adapter. */
+/** Minecraft-only world sampling shared by the Océano movement modules. */
 final class MovementMinecraftAccess {
     private static final BlockPos.MutableBlockPos POSITION = new BlockPos.MutableBlockPos();
 
@@ -24,6 +25,12 @@ final class MovementMinecraftAccess {
     static boolean isWater(World world, int x, int y, int z) {
         POSITION.set(x, y, z);
         return world.getBlockState(POSITION).getBlock().getMaterial() == Material.water;
+    }
+
+    static boolean hasCollision(World world, int x, int y, int z) {
+        POSITION.set(x, y, z);
+        IBlockState state = world.getBlockState(POSITION);
+        return state.getBlock().getCollisionBoundingBox(world, POSITION, state) != null;
     }
 
     static boolean isSupported(EntityPlayerSP player, World world,

@@ -30,6 +30,9 @@ public final class SmartPearlGatekeeper extends Module {
     private static final double VANILLA_THROW_VERTICAL_OFFSET = 0.10D;
     /* setThrowableHeading: gaussian(0, 0.0075) * inaccuracy * velocity. */
     private static final double VANILLA_THROW_INACCURACY = 0.01125D;
+    /** Visual-only erosion of the impacted face; it never rejects an otherwise valid throw. */
+    private static final double ROBUST_FACE_INSET = 0.15D;
+    private static final double GUIDE_FACE_OFFSET = 0.002D;
     private int cachedDecisionTick = Integer.MIN_VALUE;
     private EnvelopeDecision cachedDecision;
     private int lastSafeDecisionTick = Integer.MIN_VALUE;
@@ -39,6 +42,7 @@ public final class SmartPearlGatekeeper extends Module {
         this.sl.add(new Settings("Ascenso".toCharArray(), this, true));
         this.sl.add(new Settings("Descenso".toCharArray(), this, true));
         this.sl.add(new Settings("Guia".toCharArray(), this, true));
+        this.sl.add(new Settings("Seguro".toCharArray(), this, false));
         this.sl.add(new Settings("Keybind".toCharArray(), this));
         registerSettings();
         this.name = "Perlas";
@@ -69,7 +73,11 @@ public final class SmartPearlGatekeeper extends Module {
         int mode = modeForPitch(player.rotationPitch);
         if (mode == 0) return false;
         EnvelopeDecision decision = evaluatePingEnvelope(world, player, mode);
-        boolean approved = applyDecisionHysteresis(player.ticksExisted, decision);
+        // Safe mode is deliberately exact: green/hysteresis may communicate a
+        // viable throw, but only a blue robust envelope authorizes dispatch.
+        boolean approved = setting(4).getValBoolean()
+                ? decision.robust
+                : applyDecisionHysteresis(player.ticksExisted, decision);
         if (approved) return false;
         player.playSound("gui.button.press", 1.0F, 0.5F);
         return true;
@@ -80,7 +88,6 @@ public final class SmartPearlGatekeeper extends Module {
                                                    double vx, double vy, double vz) {
         long[] samples = new long[SAMPLE_WORDS];
         boolean touchedWater = false;
-        boolean solidImpact = false;
         for (int tick = 0; tick < MAX_TICKS; tick++) {
             boolean water = MovementMinecraftAccess.isWater(world, (int)Math.floor(x),
                     (int)Math.floor(y), (int)Math.floor(z));
@@ -95,12 +102,11 @@ public final class SmartPearlGatekeeper extends Module {
             int sample = (water ? 1 : 0) | (hit != null ? 2 : 0);
             samples[tick >> 4] |= (long)sample << ((tick & 15) << 2);
             if (hit != null) {
-                solidImpact = true;
-                break;
+                return new PearlTrajectorySample(samples, touchedWater, true, hit);
             }
             x = nx; y = ny; z = nz;
         }
-        return new PearlTrajectorySample(samples, touchedWater, solidImpact);
+        return new PearlTrajectorySample(samples, touchedWater, false, null);
     }
 
     public void onRenderWorld(RenderWorldLastEvent event) {
@@ -111,9 +117,9 @@ public final class SmartPearlGatekeeper extends Module {
         if (held == null || !(held.getItem() instanceof ItemEnderPearl)) return;
         int mode = modeForPitch(player.rotationPitch);
         if (mode == 0) return;
-        BlockPos impact = projectedImpact(world, player);
-        if (impact == null) return;
         EnvelopeDecision decision = evaluatePingEnvelope(world, player, mode);
+        MovingObjectPosition impact = decision.impact;
+        if (impact == null || impact.getBlockPos() == null || impact.sideHit == null) return;
         boolean approved = decision.approved && !decision.criticalWater;
         double viewX = player.prevPosX + (player.posX - player.prevPosX) * event.partialTicks;
         double viewY = player.prevPosY + (player.posY - player.prevPosY) * event.partialTicks;
@@ -125,11 +131,17 @@ public final class SmartPearlGatekeeper extends Module {
             GL11.glEnable(GL11.GL_BLEND); GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
             GL11.glLineWidth(2.0F);
             GL11.glColor4f(approved ? 0.2F : 1.0F, approved ? 1.0F : 0.2F, 0.2F, 0.9F);
-            drawOutline(impact.getX() - viewX, impact.getY() - viewY, impact.getZ() - viewZ);
+            drawFaceOutline(impact.getBlockPos(), impact.sideHit, 0.0D, viewX, viewY, viewZ);
+            if (decision.robust) {
+                GL11.glLineWidth(2.5F);
+                GL11.glColor4f(0.2F, 0.65F, 1.0F, 1.0F);
+                drawFaceOutline(impact.getBlockPos(), impact.sideHit,
+                        ROBUST_FACE_INSET, viewX, viewY, viewZ);
+            }
         } finally { GlStateManager.popMatrix(); GL11.glPopAttrib(); }
     }
 
-    private BlockPos projectedImpact(World world, EntityPlayerSP player) {
+    private MovingObjectPosition projectedImpact(World world, EntityPlayerSP player) {
         LaunchOrigin origin = vanillaLaunchOrigin(player, 0.0D);
         double x = origin.x, y = origin.y, z = origin.z;
         double vx = velocityX(player), vy = velocityY(player), vz = velocityZ(player);
@@ -140,21 +152,60 @@ public final class SmartPearlGatekeeper extends Module {
             vx *= drag; vy = vy * drag - (water ? 0.015D : 0.03D); vz *= drag;
             double nx = x + vx, ny = y + vy, nz = z + vz;
             MovingObjectPosition hit = world.rayTraceBlocks(new Vec3(x, y, z), new Vec3(nx, ny, nz), false, true, false);
-            if (hit != null) return hit.getBlockPos();
+            if (hit != null) return hit;
             x = nx; y = ny; z = nz;
         }
         return null;
     }
 
-    private static void drawOutline(double x, double y, double z) {
-        double x2 = x + 1.0D, y2 = y + 1.0D, z2 = z + 1.0D;
-        GL11.glBegin(GL11.GL_LINE_STRIP);
-        GL11.glVertex3d(x,y,z); GL11.glVertex3d(x2,y,z); GL11.glVertex3d(x2,y,z2);
-        GL11.glVertex3d(x,y,z2); GL11.glVertex3d(x,y,z); GL11.glVertex3d(x,y2,z);
-        GL11.glVertex3d(x2,y2,z); GL11.glVertex3d(x2,y,z); GL11.glVertex3d(x2,y2,z);
-        GL11.glVertex3d(x2,y2,z2); GL11.glVertex3d(x2,y,z2); GL11.glVertex3d(x2,y2,z2);
-        GL11.glVertex3d(x,y2,z2); GL11.glVertex3d(x,y,z2); GL11.glVertex3d(x,y2,z2);
-        GL11.glVertex3d(x,y2,z); GL11.glEnd();
+    private static void drawFaceOutline(BlockPos position, net.minecraft.util.EnumFacing face,
+                                        double inset, double viewX, double viewY, double viewZ) {
+        double x1 = position.getX() + inset - viewX;
+        double y1 = position.getY() + inset - viewY;
+        double z1 = position.getZ() + inset - viewZ;
+        double x2 = position.getX() + 1.0D - inset - viewX;
+        double y2 = position.getY() + 1.0D - inset - viewY;
+        double z2 = position.getZ() + 1.0D - inset - viewZ;
+        GL11.glBegin(GL11.GL_LINE_LOOP);
+        switch (face) {
+            case DOWN: {
+                double y = position.getY() - GUIDE_FACE_OFFSET - viewY;
+                GL11.glVertex3d(x1, y, z1); GL11.glVertex3d(x2, y, z1);
+                GL11.glVertex3d(x2, y, z2); GL11.glVertex3d(x1, y, z2);
+                break;
+            }
+            case UP: {
+                double y = position.getY() + 1.0D + GUIDE_FACE_OFFSET - viewY;
+                GL11.glVertex3d(x1, y, z1); GL11.glVertex3d(x1, y, z2);
+                GL11.glVertex3d(x2, y, z2); GL11.glVertex3d(x2, y, z1);
+                break;
+            }
+            case NORTH: {
+                double z = position.getZ() - GUIDE_FACE_OFFSET - viewZ;
+                GL11.glVertex3d(x1, y1, z); GL11.glVertex3d(x1, y2, z);
+                GL11.glVertex3d(x2, y2, z); GL11.glVertex3d(x2, y1, z);
+                break;
+            }
+            case SOUTH: {
+                double z = position.getZ() + 1.0D + GUIDE_FACE_OFFSET - viewZ;
+                GL11.glVertex3d(x1, y1, z); GL11.glVertex3d(x2, y1, z);
+                GL11.glVertex3d(x2, y2, z); GL11.glVertex3d(x1, y2, z);
+                break;
+            }
+            case WEST: {
+                double x = position.getX() - GUIDE_FACE_OFFSET - viewX;
+                GL11.glVertex3d(x, y1, z1); GL11.glVertex3d(x, y1, z2);
+                GL11.glVertex3d(x, y2, z2); GL11.glVertex3d(x, y2, z1);
+                break;
+            }
+            case EAST: {
+                double x = position.getX() + 1.0D + GUIDE_FACE_OFFSET - viewX;
+                GL11.glVertex3d(x, y1, z1); GL11.glVertex3d(x, y2, z1);
+                GL11.glVertex3d(x, y2, z2); GL11.glVertex3d(x, y1, z2);
+                break;
+            }
+        }
+        GL11.glEnd();
     }
 
     private static double velocityX(EntityPlayerSP player) {
@@ -198,6 +249,8 @@ public final class SmartPearlGatekeeper extends Module {
                 readPingMillis(player) / 50.0D));
         int approvedSamples = 0;
         boolean criticalWater = false;
+        MovingObjectPosition nominalImpact = projectedImpact(world, player);
+        boolean robust = isSafeFaceImpact(nominalImpact);
         double throwX = velocityX(player);
         double throwY = velocityY(player);
         double throwZ = velocityZ(player);
@@ -219,19 +272,26 @@ public final class SmartPearlGatekeeper extends Module {
             double jitteredZ = throwZ + Math.sin(yawRadians) * lateralJitter;
             PearlTrajectorySample trajectory = sampleTrajectory(world, origin.x, origin.y, origin.z,
                     jitteredX, jitteredY, jitteredZ);
+            if (!sameSafeTerminal(nominalImpact, trajectory.impact)) robust = false;
             if (trajectory.touchedWater && !trajectory.solidImpact) {
                 criticalWater = true;
+                robust = false;
                 continue;
             }
-            if (NativeBridge.approveSmartPearl(origin.x, origin.y, origin.z,
+            boolean sampleApproved = NativeBridge.approveSmartPearl(origin.x, origin.y, origin.z,
                     jitteredX, jitteredY, jitteredZ,
                     player.posY + player.motionY * offsetTicks,
-                    setting(0).getValfloat(), mode, trajectory.samples)) {
+                    setting(0).getValfloat(), mode, trajectory.samples);
+            if (sampleApproved) {
                 approvedSamples++;
+            } else {
+                robust = false;
             }
         }
         int required = (int)Math.ceil(sampleCount * 0.70D);
-        this.cachedDecision = new EnvelopeDecision(approvedSamples >= required, criticalWater);
+        boolean approved = approvedSamples >= required;
+        this.cachedDecision = new EnvelopeDecision(approved, criticalWater,
+                approved && !criticalWater && robust, nominalImpact);
         this.cachedDecisionTick = tick;
         return this.cachedDecision;
     }
@@ -287,22 +347,63 @@ public final class SmartPearlGatekeeper extends Module {
         private final long[] samples;
         private final boolean touchedWater;
         private final boolean solidImpact;
+        private final MovingObjectPosition impact;
 
-        private PearlTrajectorySample(long[] samples, boolean touchedWater, boolean solidImpact) {
+        private PearlTrajectorySample(long[] samples, boolean touchedWater, boolean solidImpact,
+                                      MovingObjectPosition impact) {
             this.samples = samples;
             this.touchedWater = touchedWater;
             this.solidImpact = solidImpact;
+            this.impact = impact;
         }
     }
 
     private static final class EnvelopeDecision {
         private final boolean approved;
         private final boolean criticalWater;
+        private final boolean robust;
+        private final MovingObjectPosition impact;
 
-        private EnvelopeDecision(boolean approved, boolean criticalWater) {
+        private EnvelopeDecision(boolean approved, boolean criticalWater,
+                                 boolean robust, MovingObjectPosition impact) {
             this.approved = approved;
             this.criticalWater = criticalWater;
+            this.robust = robust;
+            this.impact = impact;
         }
+    }
+
+    private static boolean sameSafeTerminal(MovingObjectPosition expected,
+                                            MovingObjectPosition actual) {
+        return isSafeFaceImpact(expected) && isSafeFaceImpact(actual)
+                && expected.sideHit == actual.sideHit
+                && expected.getBlockPos().equals(actual.getBlockPos());
+    }
+
+    private static boolean isSafeFaceImpact(MovingObjectPosition impact) {
+        if (impact == null || impact.getBlockPos() == null
+                || impact.sideHit == null || impact.hitVec == null) return false;
+        BlockPos block = impact.getBlockPos();
+        double localX = impact.hitVec.xCoord - block.getX();
+        double localY = impact.hitVec.yCoord - block.getY();
+        double localZ = impact.hitVec.zCoord - block.getZ();
+        switch (impact.sideHit) {
+            case DOWN:
+            case UP:
+                return insideSafeAxis(localX) && insideSafeAxis(localZ);
+            case NORTH:
+            case SOUTH:
+                return insideSafeAxis(localX) && insideSafeAxis(localY);
+            case WEST:
+            case EAST:
+                return insideSafeAxis(localZ) && insideSafeAxis(localY);
+            default:
+                return false;
+        }
+    }
+
+    private static boolean insideSafeAxis(double value) {
+        return value >= ROBUST_FACE_INSET && value <= 1.0D - ROBUST_FACE_INSET;
     }
 
     private Settings setting(int index) { return this.sl.get(index); }

@@ -1,6 +1,7 @@
 package perfectpathc.dev.modules.runtime;
 
 import java.io.BufferedInputStream;
+import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -11,7 +12,7 @@ import java.util.zip.GZIPInputStream;
 /** Reads a GZIP-compressed, versioned module container from the base JAR. */
 public final class ModuleRegistry {
     private static final int MAGIC = 0x50504D31; // "PPM1"
-    private static final int VERSION = 1;
+    private static final int VERSION = 2;
     private static final int MAX_CLASSES = 512;
     private static final int MAX_CLASS_BYTES = 2 * 1024 * 1024;
 
@@ -22,7 +23,7 @@ public final class ModuleRegistry {
      * Container payload, after GZIP decompression:
      *
      * <pre>
-     * int magic (PPM1), int version, int classCount
+     * int magic (PPM1), int version, UTF payloadEntryClass, int classCount
      * repeat classCount times: UTF binaryClassName, int bytecodeLength, byte[] bytecode
      * </pre>
      */
@@ -36,10 +37,24 @@ public final class ModuleRegistry {
         InputStream resource = resourceAnchor.getResourceAsStream(resourcePath);
         if (resource == null) throw new IOException("Embedded module resource not found: " + resourcePath);
         try {
-            return new EmbeddedModuleClassLoader(resourceAnchor.getClassLoader(), readContainer(resource));
+            Container container = readContainer(resource);
+            return new EmbeddedModuleClassLoader(resourceAnchor.getClassLoader(), container.classes,
+                    container.entryPointClassName);
         } finally {
             resource.close();
         }
+    }
+
+    /** Loads an already-authorized in-memory container without a resource lookup. */
+    public static EmbeddedModuleClassLoader loadFromBuffer(Class<?> resourceAnchor, byte[] container)
+            throws IOException {
+        if (resourceAnchor == null) throw new IllegalArgumentException("resourceAnchor cannot be null");
+        if (container == null || container.length == 0) {
+            throw new IllegalArgumentException("container cannot be empty");
+        }
+        Container parsed = readContainer(new ByteArrayInputStream(container));
+        return new EmbeddedModuleClassLoader(resourceAnchor.getClassLoader(), parsed.classes,
+                parsed.entryPointClassName);
     }
 
     /**
@@ -50,11 +65,15 @@ public final class ModuleRegistry {
         if (loader != null) loader.close();
     }
 
-    private static Map<String, byte[]> readContainer(InputStream input) throws IOException {
+    private static Container readContainer(InputStream input) throws IOException {
         DataInputStream data = new DataInputStream(new BufferedInputStream(new GZIPInputStream(input)));
         try {
             if (data.readInt() != MAGIC) throw new IOException("Invalid embedded module container");
             if (data.readInt() != VERSION) throw new IOException("Unsupported module container version");
+            String entryPointClassName = data.readUTF();
+            if (!isBinaryClassName(entryPointClassName)) {
+                throw new IOException("Invalid embedded payload entry point");
+            }
             int count = data.readInt();
             if (count < 0 || count > MAX_CLASSES) throw new IOException("Invalid module class count: " + count);
 
@@ -71,7 +90,10 @@ public final class ModuleRegistry {
                     throw new IOException("Duplicate embedded class: " + binaryName);
                 }
             }
-            return classes;
+            if (!classes.containsKey(entryPointClassName)) {
+                throw new IOException("Embedded payload entry point is missing");
+            }
+            return new Container(classes, entryPointClassName);
         } finally {
             data.close();
         }
@@ -86,5 +108,15 @@ public final class ModuleRegistry {
             }
         }
         return true;
+    }
+
+    private static final class Container {
+        private final Map<String, byte[]> classes;
+        private final String entryPointClassName;
+
+        private Container(Map<String, byte[]> classes, String entryPointClassName) {
+            this.classes = classes;
+            this.entryPointClassName = entryPointClassName;
+        }
     }
 }
